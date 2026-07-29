@@ -1,0 +1,9 @@
+FluidR3 GM SoundFont (SF3)
+==========================
+
+File: FluidR3.sf3
+
+Original Fluid (R3) SoundFont by Frank Wen, MIT license.
+SF3 compression via MuseScore sftools / Jacalz fluid-soundfont packaging.
+
+See COPYING and README.txt in this directory for full license text.

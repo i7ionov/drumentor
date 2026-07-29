@@ -1,0 +1,146 @@
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgba(6, 7, 10, 0.72);
+  backdrop-filter: blur(6px);
+}
+
+.panel {
+  width: min(420px, 100%);
+  padding: 1.5rem 1.6rem 1.25rem;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: linear-gradient(
+    165deg,
+    rgba(28, 30, 38, 0.98),
+    rgba(16, 18, 24, 0.96)
+  );
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+}
+
+.header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.15rem;
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.score {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 2.4rem;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--accent);
+}
+
+.hint {
+  margin: -0.55rem 0 1rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem 1rem;
+  margin: 0 0 1.15rem;
+}
+
+.stats div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.stats dt {
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.stats dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.breakdown {
+  list-style: none;
+  margin: 0 0 1.25rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.breakdown li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.4rem 0.55rem;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 0.92rem;
+}
+
+.breakdown strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.perfect {
+  border-left: 3px solid #5dce8a;
+}
+
+.good {
+  border-left: 3px solid #8fd46a;
+}
+
+.ok {
+  border-left: 3px solid #e8a84a;
+}
+
+.miss {
+  border-left: 3px solid #e85d5d;
+}
+
+.wrong {
+  border-left: 3px solid #c46bff;
+}
+
+.extra {
+  border-left: 3px solid var(--text-muted);
+}
+
+.dismiss {
+  appearance: none;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.55rem 0.8rem;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.dismiss:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}

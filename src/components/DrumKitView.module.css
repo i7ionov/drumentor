@@ -1,0 +1,140 @@
+.stage {
+  flex: 1 1 45%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+  padding: 1rem 1rem 0.5rem;
+}
+
+.svg {
+  width: min(100%, 720px);
+  height: auto;
+  filter: drop-shadow(0 18px 40px rgba(0, 0, 0, 0.45));
+}
+
+.approach {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+.toleranceRing {
+  fill: none;
+  stroke: color-mix(in srgb, var(--accent) 45%, transparent);
+  pointer-events: none;
+}
+
+.pad {
+  fill: var(--pad-fill);
+  stroke: var(--pad-stroke);
+  stroke-width: 2;
+  cursor: pointer;
+  transition:
+    fill 120ms ease,
+    stroke 120ms ease,
+    transform 120ms ease;
+}
+
+.pad:hover {
+  fill: var(--pad-fill-hover);
+}
+
+.padActive {
+  fill: var(--pad-active-fill);
+  stroke: var(--accent);
+  stroke-width: 3;
+  cursor: pointer;
+  filter: drop-shadow(0 0 12px var(--accent-glow));
+  transition:
+    fill 120ms ease,
+    stroke 120ms ease;
+}
+
+.padPerfect {
+  fill: rgba(93, 206, 138, 0.45);
+  stroke: #5dce8a;
+  stroke-width: 3;
+  cursor: pointer;
+  filter: drop-shadow(0 0 12px rgba(93, 206, 138, 0.55));
+}
+
+.padGood {
+  fill: rgba(143, 212, 106, 0.4);
+  stroke: #8fd46a;
+  stroke-width: 3;
+  cursor: pointer;
+  filter: drop-shadow(0 0 10px rgba(143, 212, 106, 0.45));
+}
+
+.padOk {
+  fill: rgba(232, 168, 74, 0.4);
+  stroke: #e8a84a;
+  stroke-width: 3;
+  cursor: pointer;
+  filter: drop-shadow(0 0 10px rgba(232, 168, 74, 0.45));
+}
+
+.padMiss {
+  fill: rgba(232, 93, 93, 0.4);
+  stroke: #e85d5d;
+  stroke-width: 3;
+  cursor: pointer;
+  filter: drop-shadow(0 0 10px rgba(232, 93, 93, 0.45));
+}
+
+.padWrong {
+  fill: rgba(196, 107, 255, 0.4);
+  stroke: #c46bff;
+  stroke-width: 3;
+  cursor: pointer;
+  filter: drop-shadow(0 0 10px rgba(196, 107, 255, 0.45));
+}
+
+.padExtra {
+  fill: rgba(154, 149, 140, 0.35);
+  stroke: var(--text-muted);
+  stroke-width: 3;
+  cursor: pointer;
+}
+
+.padTarget {
+  fill: color-mix(in srgb, #38668c 35%, var(--pad-fill));
+  stroke: #6fa8d8;
+  stroke-width: 3;
+  stroke-dasharray: 6 4;
+  cursor: pointer;
+  animation: targetPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes targetPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.72;
+  }
+}
+
+.label {
+  fill: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  pointer-events: none;
+  user-select: none;
+}
+
+.hint {
+  margin: 0.75rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  text-align: center;
+}

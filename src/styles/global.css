@@ -1,0 +1,43 @@
+@import url("https://fonts.googleapis.com/css2?family=Outfit:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap");
+
+:root {
+  --bg: #0c0d10;
+  --surface: #14161c;
+  --surface-2: #1b1e27;
+  --line: rgba(255, 255, 255, 0.1);
+  --text: #f2efe8;
+  --text-muted: #9a958c;
+  --accent: #e8a84a;
+  --accent-glow: rgba(232, 168, 74, 0.55);
+  --pad-fill: rgba(36, 40, 52, 0.92);
+  --pad-fill-hover: rgba(48, 54, 70, 0.95);
+  --pad-stroke: rgba(242, 239, 232, 0.28);
+  --pad-active-fill: rgba(232, 168, 74, 0.35);
+  --font-display: "Outfit", "Segoe UI", sans-serif;
+  --font-ui: "IBM Plex Sans", "Segoe UI", sans-serif;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: var(--font-ui);
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+select {
+  font-family: inherit;
+}
