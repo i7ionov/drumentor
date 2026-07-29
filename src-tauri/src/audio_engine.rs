@@ -4,7 +4,8 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -305,24 +306,40 @@ impl SharedAudio {
 }
 
 pub struct AudioEngine {
-    inner: Mutex<EngineInner>,
+    /// Serialises open requests (request + reply) so two callers cannot race.
+    device_tx: Mutex<Sender<DeviceCommand>>,
+    device_id: Mutex<Option<String>>,
     shared: Arc<Mutex<SharedAudio>>,
     epoch: Instant,
 }
 
-/// Holds the cpal stream. Marked Send/Sync so Tauri can manage `AudioEngine`.
-/// The stream is only created/dropped from command/setup paths; the audio
-/// callback only touches `SharedAudio` via `Arc<Mutex<_>>`.
-struct EngineInner {
-    stream: Option<Stream>,
-    device_id: Option<String>,
+enum DeviceCommand {
+    Open {
+        id: String,
+        reply: Sender<Result<(), String>>,
+    },
 }
 
-// SAFETY: cpal marks Stream !Send/!Sync when multiple hosts are compiled in.
-// We never move the Stream to the audio callback thread; we only keep it alive
-// in managed state and rebuild it on the control path.
-unsafe impl Send for EngineInner {}
-unsafe impl Sync for EngineInner {}
+/// Owns the cpal stream on one long-lived thread (ASIO expects that).
+fn device_thread(shared: Arc<Mutex<SharedAudio>>, rx: Receiver<DeviceCommand>) {
+    let mut current: Option<Stream> = None;
+    while let Ok(cmd) = rx.recv() {
+        match cmd {
+            DeviceCommand::Open { id, reply } => {
+                // ASIO allows only one loaded driver — drop before opening another.
+                drop(current.take());
+                let result = match open_stream(&shared, &id) {
+                    Ok(stream) => {
+                        current = Some(stream);
+                        Ok(())
+                    }
+                    Err(err) => Err(err),
+                };
+                let _ = reply.send(result);
+            }
+        }
+    }
+}
 
 pub struct AudioEngineHandle(pub Arc<AudioEngine>);
 
@@ -381,11 +398,16 @@ impl AudioEngine {
             s.ensure_player_drum_channel();
         }
 
+        let (device_tx, device_rx) = mpsc::channel();
+        let device_shared = Arc::clone(&shared);
+        std::thread::Builder::new()
+            .name("audio-device".into())
+            .spawn(move || device_thread(device_shared, device_rx))
+            .map_err(|e| format!("spawn audio-device thread: {e}"))?;
+
         let engine = Self {
-            inner: Mutex::new(EngineInner {
-                stream: None,
-                device_id: None,
-            }),
+            device_tx: Mutex::new(device_tx),
+            device_id: Mutex::new(None),
             shared,
             epoch,
         };
@@ -403,15 +425,19 @@ impl AudioEngine {
     }
 
     pub fn open_default(&self) -> Result<AudioDeviceInfo, String> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| "no default audio output device".to_string())?;
-        let name = device
-            .name()
-            .unwrap_or_else(|_| "Default Output".into());
-        let host_name = host_id_name(&host.id());
-        let id = device_id(&host_name, &name);
+        // Resolve id under the device lock, then open on the device thread
+        // (which takes the same lock — so release first).
+        let (id, name, host_name) = {
+            let _guard = lock_devices();
+            let host = host_by_id(cpal::default_host().id())
+                .ok_or_else(|| "default audio host unavailable".to_string())?;
+            let device = host
+                .default_output_device()
+                .ok_or_else(|| "no default audio output device".to_string())?;
+            let name = device.name().unwrap_or_else(|_| "Default Output".into());
+            let host_name = host_id_name(&host.id());
+            (device_id(&host_name, &name), name, host_name)
+        };
         self.open_device_by_id(&id)?;
         Ok(AudioDeviceInfo {
             id,
@@ -421,25 +447,34 @@ impl AudioEngine {
     }
 
     pub fn open_device_by_id(&self, id: &str) -> Result<(), String> {
-        let (host_name, device_name) = split_device_id(id)?;
-        let device = find_output_device(&host_name, &device_name)?;
-        self.start_stream(device, id.to_string())
+        let result = {
+            let tx = self.device_tx.lock().map_err(|e| e.to_string())?;
+            let (reply_tx, reply_rx) = mpsc::channel();
+            tx.send(DeviceCommand::Open {
+                id: id.to_string(),
+                reply: reply_tx,
+            })
+            .map_err(|_| "audio device thread stopped".to_string())?;
+            reply_rx
+                .recv()
+                .map_err(|_| "audio device thread stopped".to_string())?
+        };
+        if let Ok(mut current) = self.device_id.lock() {
+            // Failed open already dropped the previous stream.
+            *current = result.is_ok().then(|| id.to_string());
+        }
+        result
     }
 
     pub fn current_device_id(&self) -> Option<String> {
-        self.inner
-            .lock()
-            .ok()
-            .and_then(|g| g.device_id.clone())
+        self.device_id.lock().ok().and_then(|g| g.clone())
     }
 
     pub fn list_devices() -> Result<Vec<AudioDeviceInfo>, String> {
+        let _guard = lock_devices();
         let mut out = Vec::new();
-        for host_id in cpal::available_hosts() {
-            let host_name = host_id_name(&host_id);
-            let Ok(host) = cpal::host_from_id(host_id) else {
-                continue;
-            };
+        for (host_id, host) in hosts() {
+            let host_name = host_id_name(host_id);
             let Ok(devices) = host.output_devices() else {
                 continue;
             };
@@ -454,6 +489,7 @@ impl AudioEngine {
                 });
             }
         }
+        remember_hidden_devices(&mut out);
         // Prefer WASAPI / default host first for stable UI order.
         out.sort_by(|a, b| {
             host_sort_key(&a.host)
@@ -668,163 +704,162 @@ impl AudioEngine {
     pub fn stop_click_train(&self) {
         self.clear_scheduled_clicks();
     }
+}
 
-    fn start_stream(&self, device: Device, device_id: String) -> Result<(), String> {
-        let supported = device
-            .default_output_config()
-            .map_err(|e| format!("output config: {e}"))?;
+/// Build and start an output stream. Must run on the `audio-device` thread.
+fn open_stream(shared: &Arc<Mutex<SharedAudio>>, device_id: &str) -> Result<Stream, String> {
+    let _guard = lock_devices();
+    let (host_name, device_name) = split_device_id(device_id)?;
+    let device = find_output_device(&host_name, &device_name)?;
 
-        let sample_format = supported.sample_format();
-        let sample_rate = supported.sample_rate();
-        let channels = supported.channels();
-        let buffer_size = pick_buffer_size(supported.buffer_size(), TARGET_BUFFER_FRAMES);
+    let supported = device
+        .default_output_config()
+        .map_err(|e| format!("output config: {e}"))?;
 
-        let mut config = StreamConfig {
-            channels,
-            sample_rate,
-            buffer_size,
-        };
+    let sample_format = supported.sample_format();
+    let sample_rate = supported.sample_rate();
+    let channels = supported.channels();
+    let buffer_size = pick_buffer_size(supported.buffer_size(), TARGET_BUFFER_FRAMES);
 
-        {
-            let mut s = self.shared.lock().map_err(|e| e.to_string())?;
-            let rate = sample_rate.0 as f32;
-            s.sample_rate = rate;
-            s.synth.set_sample_rate(rate);
-            s.sample_pos = 0;
-            s.audio_origin_samples = 0;
-            s.pending.clear();
-            s.click_left = 0;
-            s.ensure_player_drum_channel();
-        }
+    let mut config = StreamConfig {
+        channels,
+        sample_rate,
+        buffer_size,
+    };
 
-        let shared = Arc::clone(&self.shared);
-        let channels_usize = channels as usize;
-        let err_fn = |err| eprintln!("audio stream error: {err}");
-
-        let build = |cfg: &StreamConfig| -> Result<Stream, String> {
-            match sample_format {
-                SampleFormat::F32 => {
-                    let shared = Arc::clone(&shared);
-                    device
-                        .build_output_stream(
-                            cfg,
-                            move |data: &mut [f32], _| {
-                                let frames = data.len() / channels_usize;
-                                if let Ok(mut s) = shared.lock() {
-                                    s.render_block(frames, data, channels_usize);
-                                } else {
-                                    data.fill(0.0);
-                                }
-                            },
-                            err_fn,
-                            None,
-                        )
-                        .map_err(|e| format!("build stream: {e}"))
-                }
-                SampleFormat::I16 => {
-                    let shared = Arc::clone(&shared);
-                    device
-                        .build_output_stream(
-                            cfg,
-                            move |data: &mut [i16], _| {
-                                let frames = data.len() / channels_usize;
-                                let mut tmp = vec![0f32; data.len()];
-                                if let Ok(mut s) = shared.lock() {
-                                    s.render_block(frames, &mut tmp, channels_usize);
-                                }
-                                for (out, sample) in data.iter_mut().zip(tmp.iter()) {
-                                    *out = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-                                }
-                            },
-                            err_fn,
-                            None,
-                        )
-                        .map_err(|e| format!("build stream: {e}"))
-                }
-                SampleFormat::U16 => {
-                    let shared = Arc::clone(&shared);
-                    device
-                        .build_output_stream(
-                            cfg,
-                            move |data: &mut [u16], _| {
-                                let frames = data.len() / channels_usize;
-                                let mut tmp = vec![0f32; data.len()];
-                                if let Ok(mut s) = shared.lock() {
-                                    s.render_block(frames, &mut tmp, channels_usize);
-                                }
-                                for (out, sample) in data.iter_mut().zip(tmp.iter()) {
-                                    let s = sample.clamp(-1.0, 1.0);
-                                    *out = ((s * 0.5 + 0.5) * u16::MAX as f32) as u16;
-                                }
-                            },
-                            err_fn,
-                            None,
-                        )
-                        .map_err(|e| format!("build stream: {e}"))
-                }
-                // ASIO drivers commonly expose I32 (and sometimes F64).
-                SampleFormat::I32 => {
-                    let shared = Arc::clone(&shared);
-                    device
-                        .build_output_stream(
-                            cfg,
-                            move |data: &mut [i32], _| {
-                                let frames = data.len() / channels_usize;
-                                let mut tmp = vec![0f32; data.len()];
-                                if let Ok(mut s) = shared.lock() {
-                                    s.render_block(frames, &mut tmp, channels_usize);
-                                }
-                                for (out, sample) in data.iter_mut().zip(tmp.iter()) {
-                                    *out = (sample.clamp(-1.0, 1.0) as f64 * i32::MAX as f64)
-                                        as i32;
-                                }
-                            },
-                            err_fn,
-                            None,
-                        )
-                        .map_err(|e| format!("build stream: {e}"))
-                }
-                SampleFormat::F64 => {
-                    let shared = Arc::clone(&shared);
-                    device
-                        .build_output_stream(
-                            cfg,
-                            move |data: &mut [f64], _| {
-                                let frames = data.len() / channels_usize;
-                                let mut tmp = vec![0f32; data.len()];
-                                if let Ok(mut s) = shared.lock() {
-                                    s.render_block(frames, &mut tmp, channels_usize);
-                                }
-                                for (out, sample) in data.iter_mut().zip(tmp.iter()) {
-                                    *out = f64::from(*sample);
-                                }
-                            },
-                            err_fn,
-                            None,
-                        )
-                        .map_err(|e| format!("build stream: {e}"))
-                }
-                other => Err(format!("unsupported sample format: {other:?}")),
-            }
-        };
-
-        let stream = match build(&config) {
-            Ok(s) => s,
-            Err(first_err) => {
-                // Some hosts reject Fixed buffer sizes — fall back to Default.
-                config.buffer_size = BufferSize::Default;
-                build(&config).map_err(|e| format!("{first_err}; fallback failed: {e}"))?
-            }
-        };
-
-        stream.play().map_err(|e| format!("play stream: {e}"))?;
-
-        let mut inner = self.inner.lock().map_err(|e| e.to_string())?;
-        // Drop previous stream first (stops it).
-        inner.stream = Some(stream);
-        inner.device_id = Some(device_id);
-        Ok(())
+    {
+        let mut s = shared.lock().map_err(|e| e.to_string())?;
+        let rate = sample_rate.0 as f32;
+        s.sample_rate = rate;
+        s.synth.set_sample_rate(rate);
+        s.sample_pos = 0;
+        s.audio_origin_samples = 0;
+        s.pending.clear();
+        s.click_left = 0;
+        s.ensure_player_drum_channel();
     }
+
+    let shared = Arc::clone(shared);
+    let channels_usize = channels as usize;
+    let err_fn = |err| eprintln!("audio stream error: {err}");
+
+    let build = |cfg: &StreamConfig| -> Result<Stream, String> {
+        match sample_format {
+            SampleFormat::F32 => {
+                let shared = Arc::clone(&shared);
+                device
+                    .build_output_stream(
+                        cfg,
+                        move |data: &mut [f32], _| {
+                            let frames = data.len() / channels_usize;
+                            if let Ok(mut s) = shared.lock() {
+                                s.render_block(frames, data, channels_usize);
+                            } else {
+                                data.fill(0.0);
+                            }
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|e| format!("build stream: {e}"))
+            }
+            SampleFormat::I16 => {
+                let shared = Arc::clone(&shared);
+                device
+                    .build_output_stream(
+                        cfg,
+                        move |data: &mut [i16], _| {
+                            let frames = data.len() / channels_usize;
+                            let mut tmp = vec![0f32; data.len()];
+                            if let Ok(mut s) = shared.lock() {
+                                s.render_block(frames, &mut tmp, channels_usize);
+                            }
+                            for (out, sample) in data.iter_mut().zip(tmp.iter()) {
+                                *out = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                            }
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|e| format!("build stream: {e}"))
+            }
+            SampleFormat::U16 => {
+                let shared = Arc::clone(&shared);
+                device
+                    .build_output_stream(
+                        cfg,
+                        move |data: &mut [u16], _| {
+                            let frames = data.len() / channels_usize;
+                            let mut tmp = vec![0f32; data.len()];
+                            if let Ok(mut s) = shared.lock() {
+                                s.render_block(frames, &mut tmp, channels_usize);
+                            }
+                            for (out, sample) in data.iter_mut().zip(tmp.iter()) {
+                                let s = sample.clamp(-1.0, 1.0);
+                                *out = ((s * 0.5 + 0.5) * u16::MAX as f32) as u16;
+                            }
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|e| format!("build stream: {e}"))
+            }
+            // ASIO drivers commonly expose I32 (and sometimes F64).
+            SampleFormat::I32 => {
+                let shared = Arc::clone(&shared);
+                device
+                    .build_output_stream(
+                        cfg,
+                        move |data: &mut [i32], _| {
+                            let frames = data.len() / channels_usize;
+                            let mut tmp = vec![0f32; data.len()];
+                            if let Ok(mut s) = shared.lock() {
+                                s.render_block(frames, &mut tmp, channels_usize);
+                            }
+                            for (out, sample) in data.iter_mut().zip(tmp.iter()) {
+                                *out = (sample.clamp(-1.0, 1.0) as f64 * i32::MAX as f64) as i32;
+                            }
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|e| format!("build stream: {e}"))
+            }
+            SampleFormat::F64 => {
+                let shared = Arc::clone(&shared);
+                device
+                    .build_output_stream(
+                        cfg,
+                        move |data: &mut [f64], _| {
+                            let frames = data.len() / channels_usize;
+                            let mut tmp = vec![0f32; data.len()];
+                            if let Ok(mut s) = shared.lock() {
+                                s.render_block(frames, &mut tmp, channels_usize);
+                            }
+                            for (out, sample) in data.iter_mut().zip(tmp.iter()) {
+                                *out = f64::from(*sample);
+                            }
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|e| format!("build stream: {e}"))
+            }
+            other => Err(format!("unsupported sample format: {other:?}")),
+        }
+    };
+
+    let stream = match build(&config) {
+        Ok(s) => s,
+        Err(first_err) => {
+            // Some hosts reject Fixed buffer sizes — fall back to Default.
+            config.buffer_size = BufferSize::Default;
+            build(&config).map_err(|e| format!("{first_err}; fallback failed: {e}"))?
+        }
+    };
+
+    stream.play().map_err(|e| format!("play stream: {e}"))?;
+    Ok(stream)
 }
 
 fn pick_buffer_size(supported: &SupportedBufferSize, target: u32) -> BufferSize {
@@ -888,12 +923,59 @@ fn split_device_id(id: &str) -> Result<(String, String), String> {
     Ok((host.to_string(), name.to_string()))
 }
 
+/// One `cpal::Host` per id for the process lifetime.
+///
+/// Fresh `host_from_id` calls each get an empty ASIO "loaded driver" tracker,
+/// while the SDK keeps the real driver in global state. Enumerating through a
+/// second host then reloads the driver under a live stream and kills audio with
+/// no error. Sharing hosts keeps `load_driver` aware of what is already open.
+fn hosts() -> &'static [(cpal::HostId, cpal::Host)] {
+    static HOSTS: OnceLock<Vec<(cpal::HostId, cpal::Host)>> = OnceLock::new();
+    HOSTS.get_or_init(|| {
+        cpal::available_hosts()
+            .into_iter()
+            .filter_map(|id| cpal::host_from_id(id).ok().map(|host| (id, host)))
+            .collect()
+    })
+}
+
+/// Serialises ASIO enumerate vs open (SDK driver slot is process-global).
+fn lock_devices() -> std::sync::MutexGuard<'static, ()> {
+    static DEVICE_LOCK: Mutex<()> = Mutex::new(());
+    DEVICE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn host_by_id(id: cpal::HostId) -> Option<&'static cpal::Host> {
+    hosts()
+        .iter()
+        .find(|(host_id, _)| *host_id == id)
+        .map(|(_, host)| host)
+}
+
+/// ASIO can only enumerate the loaded driver; keep previously seen ASIO devices
+/// in the picker while another one is playing.
+fn remember_hidden_devices(devices: &mut Vec<AudioDeviceInfo>) {
+    static SEEN: Mutex<Vec<AudioDeviceInfo>> = Mutex::new(Vec::new());
+    let Ok(mut seen) = SEEN.lock() else {
+        return;
+    };
+    for device in devices.iter().filter(|d| d.host == "asio") {
+        if !seen.iter().any(|s| s.id == device.id) {
+            seen.push(device.clone());
+        }
+    }
+    for device in seen.iter() {
+        if !devices.iter().any(|d| d.id == device.id) {
+            devices.push(device.clone());
+        }
+    }
+}
+
 fn find_output_device(host_name: &str, device_name: &str) -> Result<Device, String> {
-    for host_id in cpal::available_hosts() {
-        if host_id_name(&host_id) != host_name {
+    for (host_id, host) in hosts() {
+        if host_id_name(host_id) != host_name {
             continue;
         }
-        let host = cpal::host_from_id(host_id).map_err(|e| e.to_string())?;
         for device in host.output_devices().map_err(|e| e.to_string())? {
             if device.name().ok().as_deref() == Some(device_name) {
                 return Ok(device);
