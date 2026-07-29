@@ -101,9 +101,89 @@ export async function selectAudioDevice(deviceId: string): Promise<void> {
 }
 
 export async function setMuteDrums(muted: boolean): Promise<void> {
-  const { setError } = useAppStore.getState();
+  const { setMuteDrums: setLocal, setError } = useAppStore.getState();
+  setLocal(muted);
   try {
     await invoke("set_mute_drums", { muted });
+  } catch (e) {
+    setError(e instanceof Error ? e.message : String(e));
+  }
+}
+
+export async function setMasterVolume(volume: number): Promise<void> {
+  const { setMasterVolume: setLocal, setError } = useAppStore.getState();
+  setLocal(volume);
+  try {
+    await invoke("set_master_volume", { volume });
+  } catch (e) {
+    setError(e instanceof Error ? e.message : String(e));
+  }
+}
+
+export async function setTrackVolume(
+  trackId: number,
+  volume: number,
+): Promise<void> {
+  const { setTrackVolume: setLocal, setError } = useAppStore.getState();
+  setLocal(trackId, volume);
+  try {
+    await invoke("set_track_volume", { trackId, volume });
+  } catch (e) {
+    setError(e instanceof Error ? e.message : String(e));
+  }
+}
+
+export async function setTrackMute(
+  trackId: number,
+  muted: boolean,
+): Promise<void> {
+  const { setTrackMuted: setLocal, setError } = useAppStore.getState();
+  setLocal(trackId, muted);
+  try {
+    await invoke("set_track_mute", { trackId, muted });
+  } catch (e) {
+    setError(e instanceof Error ? e.message : String(e));
+  }
+}
+
+export async function setTrackSolo(
+  trackId: number,
+  solo: boolean,
+): Promise<void> {
+  const { setTrackSolo: setLocal, setError } = useAppStore.getState();
+  setLocal(trackId, solo);
+  try {
+    await invoke("set_track_solo", { trackId, solo });
+  } catch (e) {
+    setError(e instanceof Error ? e.message : String(e));
+  }
+}
+
+export async function setPlayerVolume(volume: number): Promise<void> {
+  const { setPlayerVolume: setLocal, setError } = useAppStore.getState();
+  setLocal(volume);
+  try {
+    await invoke("set_player_volume", { volume });
+  } catch (e) {
+    setError(e instanceof Error ? e.message : String(e));
+  }
+}
+
+export async function setClickMuted(muted: boolean): Promise<void> {
+  const { setClickMuted: setLocal, setError } = useAppStore.getState();
+  setLocal(muted);
+  try {
+    await invoke("set_click_muted", { muted });
+  } catch (e) {
+    setError(e instanceof Error ? e.message : String(e));
+  }
+}
+
+export async function setPlayerMuted(muted: boolean): Promise<void> {
+  const { setPlayerMuted: setLocal, setError } = useAppStore.getState();
+  setLocal(muted);
+  try {
+    await invoke("set_player_muted", { muted });
   } catch (e) {
     setError(e instanceof Error ? e.message : String(e));
   }
@@ -141,12 +221,24 @@ export async function setMetronomeVolume(volume: number): Promise<void> {
 
 /** Push persisted audio prefs into the native engine (call once on startup). */
 export async function syncMetronomePrefs(): Promise<void> {
-  const { metronomeEnabled, metronomeVolume, playPlayerDrums, setError } =
-    useAppStore.getState();
+  const {
+    metronomeEnabled,
+    metronomeVolume,
+    playPlayerDrums,
+    masterVolume,
+    playerVolume,
+    clickMuted,
+    playerMuted,
+    setError,
+  } = useAppStore.getState();
   try {
+    await invoke("set_master_volume", { volume: masterVolume });
     await invoke("set_metronome_volume", { volume: metronomeVolume });
     await invoke("set_metronome_enabled", { enabled: metronomeEnabled });
     await invoke("set_play_player_drums", { enabled: playPlayerDrums });
+    await invoke("set_player_volume", { volume: playerVolume });
+    await invoke("set_click_muted", { muted: clickMuted });
+    await invoke("set_player_muted", { muted: playerMuted });
   } catch (e) {
     setError(e instanceof Error ? e.message : String(e));
   }

@@ -18,6 +18,7 @@ flowchart TB
     KitView[DrumKitView SVG]
     HighwayView[NoteHighwayView]
     TransportUI[TransportControls]
+    MixerUI[MixerPanel]
     MapWizard[PadMapWizard]
     StatsUI[SessionStats]
   end
@@ -88,9 +89,17 @@ flowchart TB
 
 ### PlaybackScheduler
 
-- Takes note events from non-muted tracks.
+- Takes note events from non-muted / solo-audible tracks (mixer state in the audio engine).
 - For UI: `highlight { padId, atMs, velocity }` event with 50–100 ms lead time (kit), and the same `upcomingHits` stream for the highway (UI interpolates Y from `atMs` relative to the hit-line).
-- For audio: in-process `audio.schedule(ScheduleNote)` → oxisynth noteOn/Off on the sample timeline (WASAPI/ASIO).
+- For audio: in-process `audio.schedule(ScheduleNote)` → oxisynth noteOn/Off on the sample timeline (WASAPI/ASIO); velocity scaled by track gain; master gain applied post-mix.
+
+### Mixer
+
+- Owned by the native audio engine; React `MixerPanel` projects state and sends commands.
+- Per song track: volume, mute, solo (any solo → only soloed tracks audible).
+- Master / Click / Player Kit volumes; Click and Player sit outside song solo groups.
+- `Mute Drums` mutes the selected drum `track_id` (same as that strip’s M).
+- Track mixer resets on new MIDI file; preserved when only changing drum track.
 
 ### MidiInput + PadMapper
 
@@ -196,6 +205,8 @@ Invariants:
 | Which MIDI note = Snare | PadMapper + SQLite |
 | Which track = drums | Detector + user confirm |
 | Which audio device | `cpal` list/set + SQLite `audio_device_id` |
+| Track mute / solo / gain | Audio engine mixer (`track_id` on `ScheduleNote`) |
+| Master / click / player gain | Audio engine mixer |
 
 ## Expected repository layout (future scaffold)
 

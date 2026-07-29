@@ -39,10 +39,104 @@ pub fn parse_midi_file(path: &str) -> Result<ParsedMidi, MidiError> {
     Ok(ParsedMidi { summary, bytes })
 }
 
+fn decode_midi_text(bytes: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(bytes).ok()?;
+    // MIDI strings are often null-padded; bare trim() leaves \0 and the UI looks blank.
+    let cleaned: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+/// GM / MIDI default for Main Volume (CC7).
+const DEFAULT_TRACK_VOLUME: u8 = 100;
+const CC_MAIN_VOLUME: u8 = 7;
+
+/// Initial CC7 per MIDI channel: last Main Volume at/before the channel's first note
+/// (controllers often live on a conductor track, while notes are on other tracks).
+fn channel_setup_volumes(smf: &Smf<'_>) -> [u8; 16] {
+    let mut first_note_tick: [Option<u32>; 16] = [None; 16];
+    let mut cc7_events: Vec<(u32, u8, u8)> = Vec::new(); // tick, channel, value
+
+    for track in &smf.tracks {
+        let mut abs_tick: u32 = 0;
+        for event in track.iter() {
+            abs_tick = abs_tick.saturating_add(u32::from(event.delta.as_int()));
+            let TrackEventKind::Midi { channel, message } = event.kind else {
+                continue;
+            };
+            let ch = channel.as_int() as usize;
+            if ch >= 16 {
+                continue;
+            }
+            match message {
+                MidiMessage::Controller { controller, value }
+                    if controller.as_int() == CC_MAIN_VOLUME =>
+                {
+                    cc7_events.push((abs_tick, ch as u8, value.as_int()));
+                }
+                MidiMessage::NoteOn { vel, .. } if vel.as_int() > 0 => {
+                    first_note_tick[ch] =
+                        Some(match first_note_tick[ch] {
+                            Some(t) => t.min(abs_tick),
+                            None => abs_tick,
+                        });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    cc7_events.sort_by_key(|(tick, ch, _)| (*tick, *ch));
+
+    let mut volumes = [DEFAULT_TRACK_VOLUME; 16];
+    for &(tick, ch, value) in &cc7_events {
+        let limit = first_note_tick[ch as usize].unwrap_or(u32::MAX);
+        if tick <= limit {
+            volumes[ch as usize] = value;
+        }
+    }
+    volumes
+}
+
+/// Dominant MIDI channel for a track (by note count); `None` if no notes.
+fn track_primary_channel(track: &midly::Track<'_>) -> Option<u8> {
+    let mut counts = [0u32; 16];
+    for event in track.iter() {
+        if let TrackEventKind::Midi {
+            channel,
+            message: MidiMessage::NoteOn { vel, .. },
+        } = event.kind
+        {
+            if vel.as_int() > 0 {
+                let ch = channel.as_int() as usize;
+                if ch < 16 {
+                    counts[ch] += 1;
+                }
+            }
+        }
+    }
+    counts
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, n)| *n)
+        .filter(|(_, n)| **n > 0)
+        .map(|(ch, _)| ch as u8)
+}
+
 pub fn summarize_midi(bytes: &[u8], path: &str) -> Result<SongSummary, MidiError> {
     let smf = Smf::parse(bytes).map_err(|e| MidiError::Parse(e.to_string()))?;
     let ticks_per_beat = ticks_per_beat(&smf);
     let tempo_map = build_tempo_map(&smf);
+    let channel_volumes = channel_setup_volumes(&smf);
 
     let mut tracks = Vec::with_capacity(smf.tracks.len());
     let mut max_ticks: u32 = 0;
@@ -50,25 +144,38 @@ pub fn summarize_midi(bytes: &[u8], path: &str) -> Result<SongSummary, MidiError
 
     for (index, track) in smf.tracks.iter().enumerate() {
         let id = index as u16;
-        let mut name = format!("Track {id}");
+        let mut track_name: Option<String> = None;
+        let mut instrument_name: Option<String> = None;
         let mut note_count: u32 = 0;
         let mut percussion_notes: u32 = 0;
         let mut channel10_notes: u32 = 0;
         let mut abs_tick: u32 = 0;
+        // Last CC7 on this track before its first NoteOn (local override).
+        let mut local_volume_before_notes: Option<u8> = None;
+        let mut saw_note = false;
 
         for event in track.iter() {
             abs_tick = abs_tick.saturating_add(u32::from(event.delta.as_int()));
             match event.kind {
                 TrackEventKind::Meta(MetaMessage::TrackName(name_bytes)) => {
-                    if let Ok(s) = std::str::from_utf8(name_bytes) {
-                        if !s.trim().is_empty() {
-                            name = s.to_string();
-                        }
+                    if let Some(s) = decode_midi_text(name_bytes) {
+                        track_name = Some(s);
                     }
                 }
-                TrackEventKind::Midi { channel, message } => {
-                    if let MidiMessage::NoteOn { key, vel } = message {
+                TrackEventKind::Meta(MetaMessage::InstrumentName(name_bytes)) => {
+                    if let Some(s) = decode_midi_text(name_bytes) {
+                        instrument_name = Some(s);
+                    }
+                }
+                TrackEventKind::Midi { channel, message } => match message {
+                    MidiMessage::Controller { controller, value }
+                        if controller.as_int() == CC_MAIN_VOLUME && !saw_note =>
+                    {
+                        local_volume_before_notes = Some(value.as_int());
+                    }
+                    MidiMessage::NoteOn { key, vel } => {
                         if vel.as_int() > 0 {
+                            saw_note = true;
                             note_count += 1;
                             let note = key.as_int();
                             if (35..=81).contains(&note) {
@@ -79,12 +186,17 @@ pub fn summarize_midi(bytes: &[u8], path: &str) -> Result<SongSummary, MidiError
                             }
                         }
                     }
-                }
+                    _ => {}
+                },
                 _ => {}
             }
         }
 
         max_ticks = max_ticks.max(abs_tick);
+
+        let name = track_name
+            .or(instrument_name)
+            .unwrap_or_else(|| format!("Track {id}"));
 
         let name_lower = name.to_lowercase();
         let name_bonus = if ["drum", "drums", "kit", "percussion", "удар"]
@@ -117,12 +229,21 @@ pub fn summarize_midi(bytes: &[u8], path: &str) -> Result<SongSummary, MidiError
             }
         }
 
+        // Prefer CC7 written on this track; else volume of the track's primary channel
+        // (Guitar Pro / DAW exports often put CC7 on a conductor track by channel).
+        let volume = local_volume_before_notes.unwrap_or_else(|| {
+            track_primary_channel(track)
+                .map(|ch| channel_volumes[ch as usize])
+                .unwrap_or(DEFAULT_TRACK_VOLUME)
+        });
+
         tracks.push(TrackInfo {
             id,
             name,
             note_count,
             is_drum_candidate,
             drum_score,
+            volume,
         });
     }
 
@@ -215,6 +336,8 @@ pub fn build_playback_notes(
         let mut programs = [0u8; 16];
         let mut abs_tick: u32 = 0;
 
+        let track_id = track_index as u16;
+
         for event in track.iter() {
             abs_tick = abs_tick.saturating_add(u32::from(event.delta.as_int()));
             let TrackEventKind::Midi { channel, message } = event.kind else {
@@ -234,6 +357,7 @@ pub fn build_playback_notes(
                             &mut active,
                             &mut notes,
                             &mut uid,
+                            track_id,
                             role,
                             ch,
                             note,
@@ -247,6 +371,7 @@ pub fn build_playback_notes(
                             &mut active,
                             &mut notes,
                             &mut uid,
+                            track_id,
                             role,
                             ch,
                             note,
@@ -262,6 +387,7 @@ pub fn build_playback_notes(
                         &mut active,
                         &mut notes,
                         &mut uid,
+                        track_id,
                         role,
                         ch,
                         key.as_int(),
@@ -281,6 +407,7 @@ pub fn build_playback_notes(
             let duration_ms = (end_ms.saturating_sub(when_ms)).max(DEFAULT_NOTE_DURATION_MS);
             notes.push(ScheduleNote {
                 uid,
+                track_id,
                 role,
                 channel: ch,
                 program,
@@ -302,6 +429,7 @@ fn close_active_note(
     active: &mut Vec<((u8, u8), (u32, u8, u8))>,
     notes: &mut Vec<ScheduleNote>,
     uid: &mut u64,
+    track_id: u16,
     role: NoteRole,
     channel: u8,
     note: u8,
@@ -316,6 +444,7 @@ fn close_active_note(
         let duration_ms = (end_ms.saturating_sub(when_ms)).max(1);
         notes.push(ScheduleNote {
             uid: *uid,
+            track_id,
             role,
             channel: ch,
             program,
@@ -550,5 +679,41 @@ mod tests {
         // At/after tick 96 (= 500 ms): 60 BPM → 1000 ms
         assert_eq!(quarter_ms_at(&bytes, 500).unwrap(), 1000);
         assert_eq!(quarter_ms_at(&bytes, 2_000).unwrap(), 1000);
+    }
+
+    /// Format 1: CC7 on conductor track for channel 0, notes on a separate track.
+    fn midi_cc7_on_conductor() -> Vec<u8> {
+        // Track 0: CC7 ch0 = 64, end
+        // Track 1: NoteOn ch0, NoteOff, end
+        vec![
+            0x4D, 0x54, 0x68, 0x64, // MThd
+            0x00, 0x00, 0x00, 0x06,
+            0x00, 0x01, // format 1
+            0x00, 0x02, // 2 tracks
+            0x00, 0x60, // 96 tpq
+            // --- Track 0 (conductor): CC7 channel 0 value 64 ---
+            0x4D, 0x54, 0x72, 0x6B,
+            0x00, 0x00, 0x00, 0x08,
+            0x00, 0xB0, 0x07, 0x40, // CC7 = 64 on ch 0
+            0x00, 0xFF, 0x2F, 0x00,
+            // --- Track 1 (notes on ch 0) ---
+            0x4D, 0x54, 0x72, 0x6B,
+            0x00, 0x00, 0x00, 0x0B,
+            0x00, 0x90, 0x3C, 0x40, // NoteOn C4 vel 64
+            0x60, 0x80, 0x3C, 0x40, // NoteOff after 96 ticks
+            0x00, 0xFF, 0x2F, 0x00,
+        ]
+    }
+
+    #[test]
+    fn track_volume_from_conductor_cc7() {
+        let summary = summarize_midi(&midi_cc7_on_conductor(), "test.mid").unwrap();
+        assert_eq!(summary.tracks.len(), 2);
+        assert_eq!(summary.tracks[0].volume, 64); // conductor itself saw local CC7
+        assert_eq!(summary.tracks[1].note_count, 1);
+        assert_eq!(
+            summary.tracks[1].volume, 64,
+            "note track should inherit channel 0 CC7 from conductor"
+        );
     }
 }

@@ -101,7 +101,12 @@ fn parse_midi(
     audio: State<'_, AudioEngineHandle>,
 ) -> Result<SongSummary, String> {
     audio.cancel_all();
-    transport::load_midi(&session, &path)
+    audio.reset_track_mixer();
+    let summary = transport::load_midi(&session, &path)?;
+    for track in &summary.tracks {
+        audio.set_track_volume(track.id, f32::from(track.volume));
+    }
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -113,7 +118,9 @@ fn set_drum_track(
 ) -> Result<(), String> {
     audio.cancel_all();
     let profile = midi_input::get_active_profile(&midi)?;
-    transport::set_drum_track(&session, track_id, profile.as_ref())
+    transport::set_drum_track(&session, track_id, profile.as_ref())?;
+    audio.set_drum_track_id(Some(track_id));
+    Ok(())
 }
 
 #[tauri::command]
@@ -300,6 +307,60 @@ fn set_audio_device(
 #[tauri::command]
 fn set_mute_drums(muted: bool, audio: State<'_, AudioEngineHandle>) -> Result<(), String> {
     audio.set_mute_drums(muted);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_master_volume(volume: f64, audio: State<'_, AudioEngineHandle>) -> Result<(), String> {
+    audio.set_master_volume(volume as f32);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_track_volume(
+    track_id: u16,
+    volume: f64,
+    audio: State<'_, AudioEngineHandle>,
+) -> Result<(), String> {
+    audio.set_track_volume(track_id, volume as f32);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_track_mute(
+    track_id: u16,
+    muted: bool,
+    audio: State<'_, AudioEngineHandle>,
+) -> Result<(), String> {
+    audio.set_track_mute(track_id, muted);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_track_solo(
+    track_id: u16,
+    solo: bool,
+    audio: State<'_, AudioEngineHandle>,
+) -> Result<(), String> {
+    audio.set_track_solo(track_id, solo);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_player_volume(volume: f64, audio: State<'_, AudioEngineHandle>) -> Result<(), String> {
+    audio.set_player_volume(volume as f32);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_player_muted(muted: bool, audio: State<'_, AudioEngineHandle>) -> Result<(), String> {
+    audio.set_player_muted(muted);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_click_muted(muted: bool, audio: State<'_, AudioEngineHandle>) -> Result<(), String> {
+    audio.set_click_muted(muted);
     Ok(())
 }
 
@@ -506,6 +567,13 @@ pub fn run() {
             get_audio_device,
             set_audio_device,
             set_mute_drums,
+            set_master_volume,
+            set_track_volume,
+            set_track_mute,
+            set_track_solo,
+            set_player_volume,
+            set_player_muted,
+            set_click_muted,
             set_play_player_drums,
             set_metronome_enabled,
             set_metronome_volume,

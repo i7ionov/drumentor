@@ -16,6 +16,8 @@ pub struct TrackInfo {
     pub note_count: u32,
     pub is_drum_candidate: bool,
     pub drum_score: f32,
+    /// Initial Main Volume (CC7) from the file, 0–127. Default 100 if absent.
+    pub volume: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +96,7 @@ pub enum NoteRole {
 #[serde(rename_all = "camelCase")]
 pub struct ScheduleNote {
     pub uid: u64,
+    pub track_id: u16,
     pub role: NoteRole,
     pub channel: u8,
     pub program: u8,

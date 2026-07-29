@@ -101,6 +101,8 @@ export interface TrackInfo {
   noteCount: number;
   isDrumCandidate: boolean;
   drumScore: number;
+  /** Initial Main Volume (CC7) from the MIDI file, 0–127. */
+  volume: number;
 }
 
 export interface SongSummary {
@@ -156,6 +158,7 @@ export type NoteRole = "drum" | "backing";
 
 export interface ScheduleNote {
   uid: number;
+  trackId: number;
   role: NoteRole;
   channel: number;
   program: number;

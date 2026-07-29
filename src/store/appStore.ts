@@ -18,10 +18,49 @@ const HIT_LINE_STORAGE_KEY = "drumentor.hitLineY";
 const METRONOME_ENABLED_KEY = "drumentor.metronomeEnabled";
 const METRONOME_VOLUME_KEY = "drumentor.metronomeVolume";
 const PLAY_PLAYER_DRUMS_KEY = "drumentor.playPlayerDrums";
+const MASTER_VOLUME_KEY = "drumentor.masterVolume";
+const PLAYER_VOLUME_KEY = "drumentor.playerVolume";
 const DEFAULT_HIT_LINE_Y = 0.85;
 const HIT_LINE_MIN = 0.55;
 const HIT_LINE_MAX = 0.95;
-const DEFAULT_METRONOME_VOLUME = 0.7;
+/** MIDI-style volume 0–127; 100 = unity. */
+export const VOLUME_MIN = 0;
+export const VOLUME_MAX = 127;
+export const VOLUME_UNITY = 100;
+const DEFAULT_METRONOME_VOLUME = 70;
+const DEFAULT_MASTER_VOLUME = VOLUME_UNITY;
+const DEFAULT_PLAYER_VOLUME = VOLUME_UNITY;
+
+export interface TrackMixerChannel {
+  volume: number;
+  muted: boolean;
+  solo: boolean;
+}
+
+function defaultTrackChannel(): TrackMixerChannel {
+  return { volume: VOLUME_UNITY, muted: false, solo: false };
+}
+
+export function clampMidiVolume(volume: number): number {
+  if (!Number.isFinite(volume)) return VOLUME_UNITY;
+  return Math.min(VOLUME_MAX, Math.max(VOLUME_MIN, Math.round(volume)));
+}
+
+/** Load 0–127; migrate legacy 0–1 fractions. */
+function loadMidiVolume(key: string, fallback: number): number {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw == null) return fallback;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return fallback;
+    if (value > 0 && value <= 1) {
+      return clampMidiVolume(value * 100);
+    }
+    return clampMidiVolume(value);
+  } catch {
+    return fallback;
+  }
+}
 
 function loadHitLineY(): number {
   try {
@@ -43,18 +82,6 @@ function loadMetronomeEnabled(): boolean {
   }
 }
 
-function loadMetronomeVolume(): number {
-  try {
-    const raw = localStorage.getItem(METRONOME_VOLUME_KEY);
-    if (raw == null) return DEFAULT_METRONOME_VOLUME;
-    const value = Number(raw);
-    if (!Number.isFinite(value)) return DEFAULT_METRONOME_VOLUME;
-    return Math.min(1, Math.max(0, value));
-  } catch {
-    return DEFAULT_METRONOME_VOLUME;
-  }
-}
-
 function loadPlayPlayerDrums(): boolean {
   try {
     const raw = localStorage.getItem(PLAY_PLAYER_DRUMS_KEY);
@@ -65,8 +92,29 @@ function loadPlayPlayerDrums(): boolean {
   }
 }
 
+function persistMidiVolume(key: string, volume: number): void {
+  try {
+    localStorage.setItem(key, String(clampMidiVolume(volume)));
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
 export function clampHitLineY(y: number): number {
   return Math.min(HIT_LINE_MAX, Math.max(HIT_LINE_MIN, y));
+}
+
+function emptyTrackMixer(song: SongSummary | null): Record<number, TrackMixerChannel> {
+  if (!song) return {};
+  const next: Record<number, TrackMixerChannel> = {};
+  for (const t of song.tracks) {
+    next[t.id] = {
+      volume: clampMidiVolume(t.volume ?? VOLUME_UNITY),
+      muted: false,
+      solo: false,
+    };
+  }
+  return next;
 }
 
 interface AppState {
@@ -78,6 +126,12 @@ interface AppState {
   playPlayerDrums: boolean;
   metronomeEnabled: boolean;
   metronomeVolume: number;
+  mixerExpanded: boolean;
+  masterVolume: number;
+  trackMixer: Record<number, TrackMixerChannel>;
+  playerVolume: number;
+  clickMuted: boolean;
+  playerMuted: boolean;
   activePads: Set<PadId>;
   padJudgements: Map<PadId, Judgement>;
   expectedHits: ExpectedHit[];
@@ -104,10 +158,19 @@ interface AppState {
   setPositionMs: (ms: number) => void;
   setExpectedHits: (hits: ExpectedHit[]) => void;
   setHitLineY: (y: number) => void;
-  toggleMuteDrums: () => void;
+  setMuteDrums: (muted: boolean) => void;
   setPlayPlayerDrums: (enabled: boolean) => void;
   setMetronomeEnabled: (enabled: boolean) => void;
   setMetronomeVolume: (volume: number) => void;
+  setMixerExpanded: (expanded: boolean) => void;
+  setMasterVolume: (volume: number) => void;
+  setTrackVolume: (trackId: number, volume: number) => void;
+  setTrackMuted: (trackId: number, muted: boolean) => void;
+  setTrackSolo: (trackId: number, solo: boolean) => void;
+  setPlayerVolume: (volume: number) => void;
+  setClickMuted: (muted: boolean) => void;
+  setPlayerMuted: (muted: boolean) => void;
+  getTrackChannel: (trackId: number) => TrackMixerChannel;
   flashPad: (pad: PadId) => void;
   flashJudgement: (pad: PadId, judgement: Judgement) => void;
   setMidiPorts: (ports: MidiInputPort[]) => void;
@@ -137,7 +200,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   muteDrums: false,
   playPlayerDrums: loadPlayPlayerDrums(),
   metronomeEnabled: loadMetronomeEnabled(),
-  metronomeVolume: loadMetronomeVolume(),
+  metronomeVolume: loadMidiVolume(METRONOME_VOLUME_KEY, DEFAULT_METRONOME_VOLUME),
+  mixerExpanded: false,
+  masterVolume: loadMidiVolume(MASTER_VOLUME_KEY, DEFAULT_MASTER_VOLUME),
+  trackMixer: {},
+  playerVolume: loadMidiVolume(PLAYER_VOLUME_KEY, DEFAULT_PLAYER_VOLUME),
+  clickMuted: false,
+  playerMuted: false,
   activePads: new Set(),
   padJudgements: new Map(),
   expectedHits: [],
@@ -170,8 +239,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       sessionSummary: null,
       statsOpen: false,
       error: null,
+      muteDrums: false,
+      trackMixer: emptyTrackMixer(song),
     }),
-  setSelectedDrumTrackId: (id) => set({ selectedDrumTrackId: id }),
+  setSelectedDrumTrackId: (id) => {
+    const { trackMixer } = get();
+    const muteDrums =
+      id != null ? (trackMixer[id]?.muted ?? false) : false;
+    set({ selectedDrumTrackId: id, muteDrums });
+  },
   setTransportStatus: (status) => set({ transportStatus: status }),
   setPositionMs: (ms) => set({ positionMs: ms }),
   setExpectedHits: (hits) => set({ expectedHits: hits }),
@@ -184,7 +260,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     set({ hitLineY });
   },
-  toggleMuteDrums: () => set({ muteDrums: !get().muteDrums }),
+  setMuteDrums: (muted) => {
+    const { selectedDrumTrackId, trackMixer } = get();
+    if (selectedDrumTrackId == null) {
+      set({ muteDrums: muted });
+      return;
+    }
+    const prev = trackMixer[selectedDrumTrackId] ?? defaultTrackChannel();
+    set({
+      muteDrums: muted,
+      trackMixer: {
+        ...trackMixer,
+        [selectedDrumTrackId]: { ...prev, muted },
+      },
+    });
+  },
   setPlayPlayerDrums: (enabled) => {
     try {
       localStorage.setItem(PLAY_PLAYER_DRUMS_KEY, enabled ? "1" : "0");
@@ -202,14 +292,56 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ metronomeEnabled: enabled });
   },
   setMetronomeVolume: (volume) => {
-    const metronomeVolume = Math.min(1, Math.max(0, volume));
-    try {
-      localStorage.setItem(METRONOME_VOLUME_KEY, String(metronomeVolume));
-    } catch {
-      /* ignore quota / private mode */
-    }
+    const metronomeVolume = clampMidiVolume(volume);
+    persistMidiVolume(METRONOME_VOLUME_KEY, metronomeVolume);
     set({ metronomeVolume });
   },
+  setMixerExpanded: (expanded) => set({ mixerExpanded: expanded }),
+  setMasterVolume: (volume) => {
+    const masterVolume = clampMidiVolume(volume);
+    persistMidiVolume(MASTER_VOLUME_KEY, masterVolume);
+    set({ masterVolume });
+  },
+  setTrackVolume: (trackId, volume) => {
+    const { trackMixer } = get();
+    const prev = trackMixer[trackId] ?? defaultTrackChannel();
+    set({
+      trackMixer: {
+        ...trackMixer,
+        [trackId]: { ...prev, volume: clampMidiVolume(volume) },
+      },
+    });
+  },
+  setTrackMuted: (trackId, muted) => {
+    const { trackMixer, selectedDrumTrackId } = get();
+    const prev = trackMixer[trackId] ?? defaultTrackChannel();
+    set({
+      trackMixer: {
+        ...trackMixer,
+        [trackId]: { ...prev, muted },
+      },
+      ...(selectedDrumTrackId === trackId ? { muteDrums: muted } : {}),
+    });
+  },
+  setTrackSolo: (trackId, solo) => {
+    const { trackMixer } = get();
+    const prev = trackMixer[trackId] ?? defaultTrackChannel();
+    set({
+      trackMixer: {
+        ...trackMixer,
+        [trackId]: { ...prev, solo },
+      },
+    });
+  },
+  setPlayerVolume: (volume) => {
+    const playerVolume = clampMidiVolume(volume);
+    persistMidiVolume(PLAYER_VOLUME_KEY, playerVolume);
+    set({ playerVolume });
+  },
+  setClickMuted: (muted) => set({ clickMuted: muted }),
+  setPlayerMuted: (muted) => set({ playerMuted: muted }),
+  getTrackChannel: (trackId) =>
+    get().trackMixer[trackId] ?? defaultTrackChannel(),
   flashPad: (pad) => {
     const next = new Set(get().activePads);
     next.add(pad);

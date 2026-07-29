@@ -279,7 +279,6 @@ export function NoteHighwayView() {
               onPointerCancel={onPointerUp}
               onKeyDown={onHitLineKeyDown}
             >
-              <span className={styles.hitLineLabel}>NOW</span>
               <span className={styles.hitLineHandle} />
             </div>
           </>

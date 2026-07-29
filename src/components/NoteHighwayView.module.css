@@ -322,25 +322,6 @@
     0 0 22px color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
-.hitLineLabel {
-  position: absolute;
-  left: 0.55rem;
-  top: 50%;
-  transform: translateY(-50%);
-  padding: 0.12rem 0.4rem;
-  border-radius: 4px;
-  border: 1px solid color-mix(in srgb, var(--accent) 55%, white);
-  background: color-mix(in srgb, var(--surface-2) 75%, var(--accent));
-  color: #fff6e8;
-  font-family: var(--font-display);
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  line-height: 1;
-  pointer-events: none;
-  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.4);
-}
-
 .hitLineHandle {
   position: absolute;
   left: 50%;

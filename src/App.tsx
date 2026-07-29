@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { DrumKitView } from "./components/DrumKitView";
 import { NoteHighwayView } from "./components/NoteHighwayView";
 import { LatencyCalWizard } from "./components/LatencyCalWizard";
+import { MixerPanel } from "./components/MixerPanel";
 import { PadMapWizard } from "./components/PadMapWizard";
 import { SessionSummaryPanel } from "./components/SessionSummaryPanel";
 import { TransportBar } from "./components/TransportBar";
@@ -22,7 +23,6 @@ export default function App() {
   const error = useAppStore((s) => s.error);
   const setError = useAppStore((s) => s.setError);
   const [version, setVersion] = useState("…");
-  const [phase, setPhase] = useState("mvp");
 
   useEffect(() => {
     let cleanup: (() => void) | undefined;
@@ -35,10 +35,7 @@ export default function App() {
 
       try {
         const info = await loadAppInfo();
-        if (!cancelled) {
-          setVersion(info.version);
-          setPhase(info.phase);
-        }
+        if (!cancelled) setVersion(info.version);
       } catch {
         if (!cancelled) setVersion("dev");
       }
@@ -72,9 +69,9 @@ export default function App() {
         <DrumKitView />
         <NoteHighwayView />
       </main>
+      <MixerPanel />
       <footer className={styles.footer}>
         <span>Drumentor v{version}</span>
-        <span>{phase}</span>
       </footer>
       <PadMapWizard />
       <LatencyCalWizard />

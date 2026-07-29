@@ -14,7 +14,7 @@ use oxisynth::{MidiEvent, SoundFont, Synth, SynthDescriptor};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
-use crate::domain::{pad_to_gm_note, NoteRole, PadId, ScheduleNote};
+use crate::domain::{pad_to_gm_note, PadId, ScheduleNote};
 
 const TARGET_BUFFER_FRAMES: u32 = 256;
 const CLICK_FREQ_HZ: f32 = 1100.0;
@@ -22,12 +22,28 @@ const CLICK_DURATION_SEC: f32 = 0.05;
 const CLICK_GAIN: f32 = 0.22;
 const MAIN_VOLUME_CC: u8 = 7;
 const DEFAULT_SPEED: f64 = 1.0;
-/// Dedicated channel for live player hits so song Mute Drums (ch 9 CC7) does not silence them.
+/// Dedicated channel for live player hits (independent of song track mute/solo).
 const PLAYER_DRUM_CHANNEL: u8 = 15;
 const PLAYER_DRUM_BANK: u32 = 128;
 const PLAYER_HIT_DURATION_SEC: f32 = 0.35;
+/// MIDI-style volume: 0–127, unity at 100 (gain = volume / 100).
+const VOLUME_UNITY: f32 = 100.0;
+const VOLUME_MAX: f32 = 127.0;
 
 pub const EVENT_AUDIO_CLICK: &str = "audio:click";
+
+fn clamp_midi_volume(volume: f32) -> f32 {
+    if volume.is_finite() {
+        volume.clamp(0.0, VOLUME_MAX)
+    } else {
+        VOLUME_UNITY
+    }
+}
+
+/// 100 → 1.0, 127 → 1.27, 0 → 0.
+fn volume_gain(volume: f32) -> f32 {
+    clamp_midi_volume(volume) / VOLUME_UNITY
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,15 +102,25 @@ struct SharedAudio {
     pending: BinaryHeap<TimedEvent>,
     event_seq: u64,
     program_by_channel: HashMap<u8, u8>,
-    drum_channels: HashSet<u8>,
-    mute_drums: bool,
     /// SoundFont feedback for mapped MIDI pad hits (independent of song mute).
     play_player_drums: bool,
     /// Remaining samples of an in-progress click beep.
     click_left: u32,
     click_phase: f32,
-    /// Master click loudness 0.0–1.0 (multiplies [`CLICK_GAIN`]).
+    /// Master output volume 0–127 (unity 100).
+    master_volume: f32,
+    /// Per MIDI track volume 0–127 (missing → 100).
+    track_volume: HashMap<u16, f32>,
+    track_muted: HashSet<u16>,
+    track_solo: HashSet<u16>,
+    /// Selected drum track (for Mute Drums shortcut).
+    drum_track_id: Option<u16>,
+    /// Metronome click volume 0–127 (unity 100).
     click_volume: f32,
+    click_muted: bool,
+    /// Live pad hit volume 0–127 (unity 100).
+    player_volume: f32,
+    player_muted: bool,
     /// App handle for emitting click events (set after setup).
     app: Option<AppHandle>,
     epoch: Instant,
@@ -185,30 +211,63 @@ impl SharedAudio {
             channel: PLAYER_DRUM_CHANNEL,
             program_id: 0,
         });
+        let cc = if self.player_muted {
+            0
+        } else {
+            (volume_gain(self.player_volume) * 127.0)
+                .round()
+                .clamp(0.0, 127.0) as u8
+        };
         let _ = self.synth.send_event(MidiEvent::ControlChange {
             channel: PLAYER_DRUM_CHANNEL,
             ctrl: MAIN_VOLUME_CC,
-            value: 127,
+            value: cc,
         });
         self.program_by_channel.insert(PLAYER_DRUM_CHANNEL, 0);
     }
 
+    fn track_audible(&self, track_id: u16) -> bool {
+        if !self.track_solo.is_empty() {
+            return self.track_solo.contains(&track_id);
+        }
+        !self.track_muted.contains(&track_id)
+    }
+
+    fn track_gain(&self, track_id: u16) -> f32 {
+        let vol = self
+            .track_volume
+            .get(&track_id)
+            .copied()
+            .unwrap_or(VOLUME_UNITY);
+        volume_gain(vol)
+    }
+
+    fn reset_track_mixer(&mut self) {
+        self.track_volume.clear();
+        self.track_muted.clear();
+        self.track_solo.clear();
+        self.drum_track_id = None;
+    }
+
+    fn set_track_mute(&mut self, track_id: u16, muted: bool) {
+        if muted {
+            self.track_muted.insert(track_id);
+        } else {
+            self.track_muted.remove(&track_id);
+        }
+    }
+
+    fn set_track_solo(&mut self, track_id: u16, solo: bool) {
+        if solo {
+            self.track_solo.insert(track_id);
+        } else {
+            self.track_solo.remove(&track_id);
+        }
+    }
+
     fn set_mute_drums(&mut self, muted: bool) {
-        self.mute_drums = muted;
-        let volume = if muted { 0 } else { 127 };
-        let mut channels: HashSet<u8> = HashSet::from([9]);
-        channels.extend(self.drum_channels.iter().copied());
-        // Never mute the dedicated player-hit channel.
-        channels.remove(&PLAYER_DRUM_CHANNEL);
-        for ch in channels {
-            let _ = self.synth.send_event(MidiEvent::ControlChange {
-                channel: ch,
-                ctrl: MAIN_VOLUME_CC,
-                value: volume,
-            });
-            if muted {
-                let _ = self.synth.send_event(MidiEvent::AllNotesOff { channel: ch });
-            }
+        if let Some(id) = self.drum_track_id {
+            self.set_track_mute(id, muted);
         }
     }
 
@@ -270,7 +329,7 @@ impl SharedAudio {
                     let env = (self.click_left as f32
                         / (sr * CLICK_DURATION_SEC).max(1.0))
                     .clamp(0.0, 1.0);
-                    let gain = CLICK_GAIN * self.click_volume.clamp(0.0, 1.0);
+                    let gain = CLICK_GAIN * volume_gain(self.click_volume);
                     let sample =
                         (self.click_phase * std::f32::consts::TAU).sin() * gain * env;
                     left[i] = (left[i] + sample).clamp(-1.0, 1.0);
@@ -288,15 +347,16 @@ impl SharedAudio {
 
         self.sample_pos += frames as u64;
 
+        let master = volume_gain(self.master_volume);
         if channels == 1 {
             for (i, out) in interleaved.iter_mut().enumerate().take(frames) {
-                *out = (left[i] + right[i]) * 0.5;
+                *out = ((left[i] + right[i]) * 0.5 * master).clamp(-1.0, 1.0);
             }
         } else {
             for i in 0..frames {
                 let base = i * channels;
-                interleaved[base] = left[i];
-                interleaved[base + 1] = right[i];
+                interleaved[base] = (left[i] * master).clamp(-1.0, 1.0);
+                interleaved[base + 1] = (right[i] * master).clamp(-1.0, 1.0);
                 for c in 2..channels {
                     interleaved[base + c] = 0.0;
                 }
@@ -383,12 +443,18 @@ impl AudioEngine {
             pending: BinaryHeap::new(),
             event_seq: 0,
             program_by_channel: HashMap::new(),
-            drum_channels: HashSet::new(),
-            mute_drums: false,
             play_player_drums: true,
             click_left: 0,
             click_phase: 0.0,
-            click_volume: 1.0,
+            master_volume: VOLUME_UNITY,
+            track_volume: HashMap::new(),
+            track_muted: HashSet::new(),
+            track_solo: HashSet::new(),
+            drum_track_id: None,
+            click_volume: VOLUME_UNITY,
+            click_muted: false,
+            player_volume: VOLUME_UNITY,
+            player_muted: false,
             app: None,
             epoch,
         }));
@@ -525,6 +591,70 @@ impl AudioEngine {
         }
     }
 
+    pub fn reset_track_mixer(&self) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.reset_track_mixer();
+        }
+    }
+
+    pub fn set_drum_track_id(&self, track_id: Option<u16>) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.drum_track_id = track_id;
+        }
+    }
+
+    pub fn set_master_volume(&self, volume: f32) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.master_volume = clamp_midi_volume(volume);
+        }
+    }
+
+    pub fn set_track_volume(&self, track_id: u16, volume: f32) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.track_volume.insert(track_id, clamp_midi_volume(volume));
+        }
+    }
+
+    pub fn set_track_mute(&self, track_id: u16, muted: bool) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.set_track_mute(track_id, muted);
+        }
+    }
+
+    pub fn set_track_solo(&self, track_id: u16, solo: bool) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.set_track_solo(track_id, solo);
+        }
+    }
+
+    pub fn set_player_volume(&self, volume: f32) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.player_volume = clamp_midi_volume(volume);
+            s.ensure_player_drum_channel();
+        }
+    }
+
+    pub fn set_player_muted(&self, muted: bool) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.player_muted = muted;
+            if muted {
+                let _ = s.synth.send_event(MidiEvent::AllNotesOff {
+                    channel: PLAYER_DRUM_CHANNEL,
+                });
+            }
+            s.ensure_player_drum_channel();
+        }
+    }
+
+    pub fn set_click_muted(&self, muted: bool) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.click_muted = muted;
+            if muted {
+                s.click_left = 0;
+            }
+        }
+    }
+
     pub fn set_play_player_drums(&self, enabled: bool) {
         if let Ok(mut s) = self.shared.lock() {
             s.play_player_drums = enabled;
@@ -543,11 +673,14 @@ impl AudioEngine {
         let Ok(mut s) = self.shared.lock() else {
             return;
         };
-        if !s.play_player_drums {
+        if !s.play_player_drums || s.player_muted || s.player_volume <= 0.0 {
             return;
         }
         let note = pad_to_gm_note(pad);
-        let vel = velocity.clamp(1, 127);
+        let scaled = (f32::from(velocity.clamp(1, 127)) * volume_gain(s.player_volume))
+            .round()
+            .clamp(1.0, 127.0) as u8;
+        let vel = scaled;
         s.ensure_player_drum_channel();
         let at = s.sample_pos;
         s.push_event(
@@ -570,11 +703,7 @@ impl AudioEngine {
 
     pub fn set_click_volume(&self, volume: f32) {
         if let Ok(mut s) = self.shared.lock() {
-            s.click_volume = if volume.is_finite() {
-                volume.clamp(0.0, 1.0)
-            } else {
-                1.0
-            };
+            s.click_volume = clamp_midi_volume(volume);
         }
     }
 
@@ -583,7 +712,7 @@ impl AudioEngine {
         let Ok(mut s) = self.shared.lock() else {
             return;
         };
-        if !s.armed || s.click_volume <= 0.0 {
+        if !s.armed || s.click_muted || s.click_volume <= 0.0 {
             return;
         }
         let start = s.session_to_sample(when_ms as f64);
@@ -615,11 +744,19 @@ impl AudioEngine {
             return;
         }
 
-        if note.role == NoteRole::Drum {
-            s.drum_channels.insert(note.channel);
-            if s.mute_drums {
-                return;
-            }
+        if !s.track_audible(note.track_id) {
+            return;
+        }
+
+        let gain = s.track_gain(note.track_id);
+        if gain <= 0.0 {
+            return;
+        }
+        let velocity = (f32::from(note.velocity) * gain)
+            .round()
+            .clamp(0.0, 127.0) as u8;
+        if velocity == 0 {
+            return;
         }
 
         let start = s.session_to_sample(note.when_ms as f64);
@@ -647,7 +784,7 @@ impl AudioEngine {
             TimedKind::NoteOn {
                 channel: note.channel,
                 note: note.note,
-                velocity: note.velocity,
+                velocity,
             },
         );
 
@@ -666,6 +803,7 @@ impl AudioEngine {
     /// Immediate click (returns wall_ms when queued).
     pub fn play_click(&self) -> Result<f64, String> {
         let mut s = self.shared.lock().map_err(|e| e.to_string())?;
+        // Calibration clicks ignore metronome mute.
         let wall = s.wall_ms();
         let at = s.sample_pos;
         s.push_event(at, TimedKind::Click { index: 0 });

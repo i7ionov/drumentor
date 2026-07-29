@@ -14,17 +14,17 @@ import {
   setActivePadMap,
   setDrumTrack,
   setLatencyOffset,
+  setMasterVolume,
   setMuteDrums,
   setPlayPlayerDrums,
   setMetronomeEnabled,
-  setMetronomeVolume,
   transportPause,
   transportPlay,
   transportSeek,
   transportSetSpeed,
   transportStop,
 } from "../lib/tauri";
-import { useAppStore } from "../store/appStore";
+import { useAppStore, VOLUME_MAX, VOLUME_MIN } from "../store/appStore";
 
 const SEEK_STEP_MS = 1000;
 
@@ -75,7 +75,7 @@ export function TransportBar() {
   const muteDrums = useAppStore((s) => s.muteDrums);
   const playPlayerDrums = useAppStore((s) => s.playPlayerDrums);
   const metronomeEnabled = useAppStore((s) => s.metronomeEnabled);
-  const metronomeVolume = useAppStore((s) => s.metronomeVolume);
+  const masterVolume = useAppStore((s) => s.masterVolume);
   const midiPorts = useAppStore((s) => s.midiPorts);
   const selectedMidiPortId = useAppStore((s) => s.selectedMidiPortId);
   const audioDevices = useAppStore((s) => s.audioDevices);
@@ -88,7 +88,6 @@ export function TransportBar() {
   const wizardOpen = useAppStore((s) => s.wizardOpen);
   const latencyWizardOpen = useAppStore((s) => s.latencyWizardOpen);
   const statsOpen = useAppStore((s) => s.statsOpen);
-  const toggleMuteDrums = useAppStore((s) => s.toggleMuteDrums);
   const setWizardOpen = useAppStore((s) => s.setWizardOpen);
   const setLatencyWizardOpen = useAppStore((s) => s.setLatencyWizardOpen);
   const setStatsOpen = useAppStore((s) => s.setStatsOpen);
@@ -97,7 +96,7 @@ export function TransportBar() {
   const [scrubMs, setScrubMs] = useState(0);
   const seekTimer = useRef<number | null>(null);
   const latencyTimer = useRef<number | null>(null);
-  const metroVolTimer = useRef<number | null>(null);
+  const masterVolTimer = useRef<number | null>(null);
 
   const duration = song?.durationMs ?? 0;
   const canPlay = Boolean(song) && selectedDrumTrackId != null;
@@ -135,13 +134,13 @@ export function TransportBar() {
     }, 120);
   };
 
-  const onMetronomeVolumeInput = (value: number) => {
-    useAppStore.getState().setMetronomeVolume(value);
-    if (metroVolTimer.current != null) {
-      window.clearTimeout(metroVolTimer.current);
+  const onMasterVolumeInput = (value: number) => {
+    useAppStore.getState().setMasterVolume(value);
+    if (masterVolTimer.current != null) {
+      window.clearTimeout(masterVolTimer.current);
     }
-    metroVolTimer.current = window.setTimeout(() => {
-      void setMetronomeVolume(value);
+    masterVolTimer.current = window.setTimeout(() => {
+      void setMasterVolume(value);
     }, 80);
   };
 
@@ -196,8 +195,8 @@ export function TransportBar() {
       if (latencyTimer.current != null) {
         window.clearTimeout(latencyTimer.current);
       }
-      if (metroVolTimer.current != null) {
-        window.clearTimeout(metroVolTimer.current);
+      if (masterVolTimer.current != null) {
+        window.clearTimeout(masterVolTimer.current);
       }
     };
   }, []);
@@ -259,11 +258,9 @@ export function TransportBar() {
         <button
           type="button"
           className={muteDrums ? styles.btnActive : styles.btn}
-          onClick={() => {
-            const next = !muteDrums;
-            toggleMuteDrums();
-            void setMuteDrums(next);
-          }}
+          disabled={selectedDrumTrackId == null}
+          title="Mute the selected drum track"
+          onClick={() => void setMuteDrums(!muteDrums)}
         >
           Mute Drums
         </button>
@@ -283,24 +280,20 @@ export function TransportBar() {
         >
           Metronome
         </button>
-        <label
-          className={styles.metroVol}
-          title="Metronome volume"
-        >
-          <span className={styles.metroVolLabel}>Click</span>
+        <label className={styles.metroVol} title="Master volume (0–127, unity 100)">
+          <span className={styles.metroVolLabel}>Master</span>
           <input
             className={styles.metroVolSlider}
             type="range"
-            min={0}
-            max={1}
-            step={0.05}
-            value={metronomeVolume}
-            disabled={!metronomeEnabled}
-            aria-label="Metronome volume"
-            onChange={(e) => onMetronomeVolumeInput(Number(e.target.value))}
+            min={VOLUME_MIN}
+            max={VOLUME_MAX}
+            step={1}
+            value={masterVolume}
+            aria-label="Master volume"
+            onChange={(e) => onMasterVolumeInput(Number(e.target.value))}
           />
           <span className={styles.metroVolValue}>
-            {Math.round(metronomeVolume * 100)}%
+            {Math.round(masterVolume)}%
           </span>
         </label>
       </div>

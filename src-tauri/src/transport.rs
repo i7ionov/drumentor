@@ -276,9 +276,9 @@ pub fn set_metronome_enabled(
 
 pub fn set_metronome_volume(app: &AppHandle, volume: f64) -> Result<(), String> {
     let vol = if volume.is_finite() {
-        volume.clamp(0.0, 1.0) as f32
+        volume.clamp(0.0, 127.0) as f32
     } else {
-        1.0
+        100.0
     };
     if let Some(audio) = app.try_state::<crate::audio_engine::AudioEngineHandle>() {
         audio.set_click_volume(vol);
