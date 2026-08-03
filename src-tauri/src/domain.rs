@@ -26,8 +26,17 @@ pub struct SongSummary {
     pub path: String,
     pub track_count: u16,
     pub duration_ms: u64,
+    /// Musical measure boundaries in session milliseconds, including 0 and song end.
+    pub bar_boundaries_ms: Vec<u64>,
     pub tracks: Vec<TrackInfo>,
     pub suggested_drum_track_id: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoopRegion {
+    pub start_ms: u64,
+    pub end_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +54,9 @@ pub struct TransportState {
     pub duration_ms: u64,
     /// Playback rate multiplier (0.1–1.0). Song timeline stays in ms at 1×.
     pub speed: f64,
+    pub repeat_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_region: Option<LoopRegion>,
 }
 
 impl Default for TransportState {
@@ -54,6 +66,8 @@ impl Default for TransportState {
             position_ms: 0,
             duration_ms: 0,
             speed: 1.0,
+            repeat_enabled: false,
+            loop_region: None,
         }
     }
 }
@@ -74,6 +88,9 @@ pub struct PositionEvent {
     pub status: String,
     pub duration_ms: u64,
     pub speed: f64,
+    pub repeat_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_region: Option<LoopRegion>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

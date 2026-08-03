@@ -28,6 +28,13 @@ struct TempoPoint {
     us_per_quarter: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TimeSignaturePoint {
+    tick: u32,
+    numerator: u8,
+    denominator_pow: u8,
+}
+
 pub struct ParsedMidi {
     pub summary: SongSummary,
     pub bytes: Vec<u8>,
@@ -84,11 +91,10 @@ fn channel_setup_volumes(smf: &Smf<'_>) -> [u8; 16] {
                     cc7_events.push((abs_tick, ch as u8, value.as_int()));
                 }
                 MidiMessage::NoteOn { vel, .. } if vel.as_int() > 0 => {
-                    first_note_tick[ch] =
-                        Some(match first_note_tick[ch] {
-                            Some(t) => t.min(abs_tick),
-                            None => abs_tick,
-                        });
+                    first_note_tick[ch] = Some(match first_note_tick[ch] {
+                        Some(t) => t.min(abs_tick),
+                        None => abs_tick,
+                    });
                 }
                 _ => {}
             }
@@ -248,6 +254,7 @@ pub fn summarize_midi(bytes: &[u8], path: &str) -> Result<SongSummary, MidiError
     }
 
     let duration_ms = tick_to_ms(max_ticks, ticks_per_beat, &tempo_map);
+    let bar_boundaries_ms = bar_boundaries_for_smf(&smf, ticks_per_beat, &tempo_map, max_ticks);
 
     Ok(SongSummary {
         path: Path::new(path)
@@ -257,6 +264,7 @@ pub fn summarize_midi(bytes: &[u8], path: &str) -> Result<SongSummary, MidiError
             .to_string(),
         track_count: tracks.len() as u16,
         duration_ms,
+        bar_boundaries_ms,
         tracks,
         suggested_drum_track_id: suggested.map(|(id, _)| id),
     })
@@ -499,6 +507,104 @@ pub fn build_metronome_beats(bytes: &[u8]) -> Result<Vec<u64>, MidiError> {
     Ok(beats)
 }
 
+fn build_time_signature_map(smf: &Smf) -> Vec<TimeSignaturePoint> {
+    let mut points = Vec::new();
+    for track in &smf.tracks {
+        let mut abs_tick = 0u32;
+        for event in track {
+            abs_tick = abs_tick.saturating_add(event.delta.as_int());
+            if let TrackEventKind::Meta(MetaMessage::TimeSignature(
+                numerator,
+                denominator_pow,
+                _,
+                _,
+            )) = event.kind
+            {
+                points.push(TimeSignaturePoint {
+                    tick: abs_tick,
+                    numerator: numerator.max(1),
+                    denominator_pow,
+                });
+            }
+        }
+    }
+    points.sort_by_key(|point| point.tick);
+    let mut deduped: Vec<TimeSignaturePoint> = Vec::new();
+    for point in points {
+        if let Some(last) = deduped.last_mut() {
+            if last.tick == point.tick {
+                *last = point;
+                continue;
+            }
+        }
+        deduped.push(point);
+    }
+    if deduped.first().map(|point| point.tick) != Some(0) {
+        deduped.insert(
+            0,
+            TimeSignaturePoint {
+                tick: 0,
+                numerator: 4,
+                denominator_pow: 2,
+            },
+        );
+    }
+    deduped
+}
+
+fn bar_ticks(signatures: &[TimeSignaturePoint], ticks_per_quarter: u32, max_tick: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    if ticks_per_quarter == 0 {
+        return vec![0, max_tick];
+    }
+    for (index, signature) in signatures.iter().enumerate() {
+        if signature.tick > max_tick {
+            break;
+        }
+        let segment_end = signatures
+            .get(index + 1)
+            .map(|next| next.tick.min(max_tick))
+            .unwrap_or(max_tick);
+        out.push(signature.tick);
+        let denominator = 1u64
+            .checked_shl(u32::from(signature.denominator_pow))
+            .unwrap_or(u64::MAX);
+        let length = (u64::from(ticks_per_quarter)
+            .saturating_mul(u64::from(signature.numerator))
+            .saturating_mul(4)
+            / denominator)
+            .max(1) as u32;
+        let mut tick = signature.tick;
+        while let Some(next) = tick.checked_add(length) {
+            if next >= segment_end {
+                break;
+            }
+            out.push(next);
+            tick = next;
+        }
+    }
+    out.push(max_tick);
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+fn bar_boundaries_for_smf(
+    smf: &Smf,
+    ticks_per_quarter: u32,
+    tempo_map: &[TempoPoint],
+    max_tick: u32,
+) -> Vec<u64> {
+    let signatures = build_time_signature_map(smf);
+    let mut boundaries: Vec<u64> = bar_ticks(&signatures, ticks_per_quarter, max_tick)
+        .into_iter()
+        .map(|tick| tick_to_ms(tick, ticks_per_quarter, tempo_map))
+        .collect();
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    boundaries
+}
+
 /// Quarter-note duration in session ms at `position_ms` (MIDI tempo map).
 /// Falls back to 500 ms (120 BPM) when the file has no tempo meta.
 pub fn quarter_ms_at(bytes: &[u8], position_ms: u64) -> Result<u64, MidiError> {
@@ -648,8 +754,7 @@ mod tests {
     fn midi_tempo_change() -> Vec<u8> {
         vec![
             0x4D, 0x54, 0x68, 0x64, // MThd
-            0x00, 0x00, 0x00, 0x06,
-            0x00, 0x00, // format 0
+            0x00, 0x00, 0x00, 0x06, 0x00, 0x00, // format 0
             0x00, 0x01, // 1 track
             0x00, 0x60, // 96 tpq
             0x4D, 0x54, 0x72, 0x6B, // MTrk
@@ -657,8 +762,7 @@ mod tests {
             // delta 0, tempo 500_000 (120 BPM)
             0x00, 0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20,
             // delta 96 (0x60), tempo 1_000_000 (60 BPM)
-            0x60, 0xFF, 0x51, 0x03, 0x0F, 0x42, 0x40,
-            // delta 0, end of track
+            0x60, 0xFF, 0x51, 0x03, 0x0F, 0x42, 0x40, // delta 0, end of track
             0x00, 0xFF, 0x2F, 0x00,
         ]
     }
@@ -681,25 +785,75 @@ mod tests {
         assert_eq!(quarter_ms_at(&bytes, 2_000).unwrap(), 1000);
     }
 
+    #[test]
+    fn bar_grid_defaults_to_four_four() {
+        let signatures = vec![TimeSignaturePoint {
+            tick: 0,
+            numerator: 4,
+            denominator_pow: 2,
+        }];
+        assert_eq!(bar_ticks(&signatures, 96, 960), vec![0, 384, 768, 960]);
+    }
+
+    #[test]
+    fn bar_grid_handles_three_four_and_signature_change() {
+        let signatures = vec![
+            TimeSignaturePoint {
+                tick: 0,
+                numerator: 3,
+                denominator_pow: 2,
+            },
+            TimeSignaturePoint {
+                tick: 576,
+                numerator: 4,
+                denominator_pow: 2,
+            },
+        ];
+        assert_eq!(
+            bar_ticks(&signatures, 96, 1_200),
+            vec![0, 288, 576, 960, 1_200]
+        );
+    }
+
+    #[test]
+    fn bar_boundaries_follow_tempo_changes() {
+        let tempo = vec![
+            TempoPoint {
+                tick: 0,
+                us_per_quarter: 500_000,
+            },
+            TempoPoint {
+                tick: 384,
+                us_per_quarter: 1_000_000,
+            },
+        ];
+        let signatures = vec![TimeSignaturePoint {
+            tick: 0,
+            numerator: 4,
+            denominator_pow: 2,
+        }];
+        let times: Vec<u64> = bar_ticks(&signatures, 96, 768)
+            .into_iter()
+            .map(|tick| tick_to_ms(tick, 96, &tempo))
+            .collect();
+        assert_eq!(times, vec![0, 2_000, 6_000]);
+    }
+
     /// Format 1: CC7 on conductor track for channel 0, notes on a separate track.
     fn midi_cc7_on_conductor() -> Vec<u8> {
         // Track 0: CC7 ch0 = 64, end
         // Track 1: NoteOn ch0, NoteOff, end
         vec![
             0x4D, 0x54, 0x68, 0x64, // MThd
-            0x00, 0x00, 0x00, 0x06,
-            0x00, 0x01, // format 1
+            0x00, 0x00, 0x00, 0x06, 0x00, 0x01, // format 1
             0x00, 0x02, // 2 tracks
             0x00, 0x60, // 96 tpq
             // --- Track 0 (conductor): CC7 channel 0 value 64 ---
-            0x4D, 0x54, 0x72, 0x6B,
-            0x00, 0x00, 0x00, 0x08,
-            0x00, 0xB0, 0x07, 0x40, // CC7 = 64 on ch 0
-            0x00, 0xFF, 0x2F, 0x00,
-            // --- Track 1 (notes on ch 0) ---
-            0x4D, 0x54, 0x72, 0x6B,
-            0x00, 0x00, 0x00, 0x0B,
-            0x00, 0x90, 0x3C, 0x40, // NoteOn C4 vel 64
+            0x4D, 0x54, 0x72, 0x6B, 0x00, 0x00, 0x00, 0x08, 0x00, 0xB0, 0x07,
+            0x40, // CC7 = 64 on ch 0
+            0x00, 0xFF, 0x2F, 0x00, // --- Track 1 (notes on ch 0) ---
+            0x4D, 0x54, 0x72, 0x6B, 0x00, 0x00, 0x00, 0x0B, 0x00, 0x90, 0x3C,
+            0x40, // NoteOn C4 vel 64
             0x60, 0x80, 0x3C, 0x40, // NoteOff after 96 ticks
             0x00, 0xFF, 0x2F, 0x00,
         ]

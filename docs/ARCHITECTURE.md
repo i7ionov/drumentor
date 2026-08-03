@@ -70,7 +70,7 @@ flowchart TB
 ### MidiParser
 
 - Input: `.mid` / `.midi` bytes.
-- Output: `SongModel` — tracks, tempo map, time signatures, duration.
+- Output: `SongModel` — tracks, tempo map, time signatures, duration, and bar boundaries in session milliseconds.
 - Errors: Result → UI toast / dialog.
 
 ### DrumTrackDetector
@@ -81,11 +81,19 @@ flowchart TB
 ### TransportClock
 
 - State: `stopped | playing | paused`.
-- Fields: `originInstant`, `positionMs`, `speed` (v1), `loopRegion` (v1).
+- Fields: `originInstant`, wrapped `positionMs`, monotonic scheduler position, `speed`, `repeatEnabled`, optional `loopRegion`.
 - API: play, pause, stop, seek.
 - Ticks and emits:
   - `position` (for UI scrubber, throttle ~30–60 Hz),
   - `upcomingHits` (lookahead window for kit highlighting, note highway, and audio schedule).
+
+Repeat has three modes:
+
+1. disabled — playback ignores the selected region and stops at song end;
+2. enabled with a region — `[startMs, endMs)` repeats;
+3. enabled without a region — the whole song repeats.
+
+Region handles are quantized to MIDI bar boundaries. A missing time-signature event uses the MIDI default 4/4. The UI playhead wraps, while the scheduler clock remains monotonic so events from the next pass can be queued before the boundary.
 
 ### PlaybackScheduler
 
@@ -190,6 +198,8 @@ Invariants:
 3. UI highlighting and highway may use lookahead for smoothness; scoring uses the actual session time of the hit.
 4. `latencyOffsetMs` (v1 calibration) is added to incoming MIDI time — sign and wizard are fixed in the implementation and in SCORING/settings. Calibration click train goes through the same native sink.
 5. **`hitLineY` (UI preference)** affects only highway geometry (approach length). Do not mix with `latencyOffsetMs`: shifting the hit-line does not change expected `timeMs` and does not “fix” latency.
+6. Repeat never re-arms the audio engine at a normal wrap. Notes, metronome clicks, and highlights for the next pass are scheduled on the monotonic timeline during lookahead, preserving the downbeat and allowing drum tails to ring across the boundary.
+7. Repeat keeps per-hit judgement feedback on the kit/highway, but each pass gets a fresh matcher. Aggregate counts, summaries, and SQLite session persistence are disabled while Repeat is active.
 
 ## Responsibility boundaries
 
@@ -222,7 +232,7 @@ Exact monorepo layout is chosen at scaffold time; documentation does not depend 
 
 ## v1/v2 extensions (without breaking the core)
 
-- **Loop / speed** — TransportClock parameters; expected timeline is recomputed or scaled.
+- **Repeat / speed** — implemented TransportClock parameters; Repeat uses bar-quantized optional regions and a monotonic audio schedule.
 - **Cloud sync** — SessionService gets a remote adapter; local SQLite remains the offline source.
 - **Custom kits** — KitView reads layout JSON; PadId enum is extended carefully (versioned schema).
 - **ASIO** — Cargo feature `asio` + Steinberg SDK; device picker already supports host `asio`.

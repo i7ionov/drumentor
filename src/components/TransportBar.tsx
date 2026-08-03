@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type PointerEvent } from "react";
 import styles from "./TransportBar.module.css";
 import {
   LATENCY_OFFSET_MAX,
@@ -21,9 +21,12 @@ import {
   transportPause,
   transportPlay,
   transportSeek,
+  transportSetLoopRegion,
+  transportSetRepeat,
   transportSetSpeed,
   transportStop,
 } from "../lib/tauri";
+import type { LoopRegion } from "../domain/types";
 import { useAppStore, VOLUME_MAX, VOLUME_MIN } from "../store/appStore";
 
 const SEEK_STEP_MS = 1000;
@@ -72,6 +75,8 @@ export function TransportBar() {
   const transportStatus = useAppStore((s) => s.transportStatus);
   const positionMs = useAppStore((s) => s.positionMs);
   const playbackSpeed = useAppStore((s) => s.playbackSpeed);
+  const repeatEnabled = useAppStore((s) => s.repeatEnabled);
+  const loopRegion = useAppStore((s) => s.loopRegion);
   const muteDrums = useAppStore((s) => s.muteDrums);
   const playPlayerDrums = useAppStore((s) => s.playPlayerDrums);
   const metronomeEnabled = useAppStore((s) => s.metronomeEnabled);
@@ -94,9 +99,14 @@ export function TransportBar() {
 
   const [scrubbing, setScrubbing] = useState(false);
   const [scrubMs, setScrubMs] = useState(0);
+  const [draftRegion, setDraftRegion] = useState<LoopRegion | null>(null);
   const seekTimer = useRef<number | null>(null);
   const latencyTimer = useRef<number | null>(null);
   const masterVolTimer = useRef<number | null>(null);
+  const rulerRef = useRef<HTMLDivElement>(null);
+  const dragKind = useRef<"create" | "start" | "end" | null>(null);
+  const dragAnchor = useRef(0);
+  const draftRegionRef = useRef<LoopRegion | null>(null);
 
   const duration = song?.durationMs ?? 0;
   const canPlay = Boolean(song) && selectedDrumTrackId != null;
@@ -110,6 +120,102 @@ export function TransportBar() {
   const canDecreaseSpeed = playbackSpeed > PLAYBACK_SPEED_MIN + 1e-9;
   const canIncreaseSpeed = playbackSpeed < PLAYBACK_SPEED_MAX - 1e-9;
   const modalOpen = wizardOpen || latencyWizardOpen || statsOpen;
+  const bars = song?.barBoundariesMs ?? [];
+  const shownRegion = draftRegion ?? loopRegion;
+
+  useEffect(() => {
+    setDraftRegion(null);
+    draftRegionRef.current = null;
+  }, [loopRegion?.startMs, loopRegion?.endMs]);
+
+  const nearestBarBoundary = (clientX: number): number => {
+    const ruler = rulerRef.current;
+    if (!ruler || bars.length === 0) return 0;
+    const rect = ruler.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    const raw = ratio * duration;
+    return bars.reduce((best, boundary) =>
+      Math.abs(boundary - raw) < Math.abs(best - raw) ? boundary : best,
+    );
+  };
+
+  const setDraft = (region: LoopRegion | null) => {
+    draftRegionRef.current = region;
+    setDraftRegion(region);
+  };
+
+  const updateRegionDrag = (clientX: number) => {
+    const boundary = nearestBarBoundary(clientX);
+    const kind = dragKind.current;
+    if (!kind || bars.length < 2) return;
+    if (kind === "create") {
+      const a = dragAnchor.current;
+      if (a === boundary) {
+        const index = Math.max(0, bars.indexOf(a));
+        const end = bars[Math.min(index + 1, bars.length - 1)];
+        const start = end === a ? bars[Math.max(0, index - 1)] : a;
+        setDraft(start < end ? { startMs: start, endMs: end } : null);
+      } else {
+        setDraft({
+          startMs: Math.min(a, boundary),
+          endMs: Math.max(a, boundary),
+        });
+      }
+      return;
+    }
+    const current = draftRegionRef.current ?? loopRegion;
+    if (!current) return;
+    if (kind === "start" && boundary < current.endMs) {
+      setDraft({ ...current, startMs: boundary });
+    } else if (kind === "end" && boundary > current.startMs) {
+      setDraft({ ...current, endMs: boundary });
+    }
+  };
+
+  const beginRegionDrag = (
+    kind: "create" | "start" | "end",
+    event: PointerEvent<HTMLElement>,
+  ) => {
+    if (!song || bars.length < 2) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragKind.current = kind;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    if (kind === "create") {
+      dragAnchor.current = nearestBarBoundary(event.clientX);
+    } else {
+      setDraft(loopRegion);
+    }
+    updateRegionDrag(event.clientX);
+  };
+
+  const finishRegionDrag = (event: PointerEvent<HTMLElement>) => {
+    if (!dragKind.current) return;
+    updateRegionDrag(event.clientX);
+    dragKind.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    const next = draftRegionRef.current;
+    if (next) void transportSetLoopRegion(next);
+  };
+
+  const nudgeLoopBoundary = (edge: "start" | "end", delta: number) => {
+    if (!loopRegion || bars.length < 2) return;
+    const value = edge === "start" ? loopRegion.startMs : loopRegion.endMs;
+    const index = Math.max(0, bars.indexOf(value));
+    const nextIndex = Math.min(bars.length - 1, Math.max(0, index + delta));
+    const boundary = bars[nextIndex];
+    const next =
+      edge === "start"
+        ? boundary < loopRegion.endMs
+          ? { ...loopRegion, startMs: boundary }
+          : null
+        : boundary > loopRegion.startMs
+          ? { ...loopRegion, endMs: boundary }
+          : null;
+    if (next) void transportSetLoopRegion(next);
+  };
 
   const onSeekInput = (value: number) => {
     setScrubbing(true);
@@ -230,6 +336,16 @@ export function TransportBar() {
         >
           Stop
         </button>
+        <button
+          type="button"
+          className={repeatEnabled ? styles.btnActive : styles.btn}
+          disabled={!song}
+          aria-pressed={repeatEnabled}
+          title={loopRegion ? "Repeat selected bars" : "Repeat whole song"}
+          onClick={() => void transportSetRepeat(!repeatEnabled)}
+        >
+          Repeat
+        </button>
         <div className={styles.speed} role="group" aria-label="Playback speed">
           <button
             type="button"
@@ -302,7 +418,7 @@ export function TransportBar() {
         <span className={styles.time}>
           {formatMs(displayMs)} / {formatMs(duration)}
         </span>
-        {accuracy != null && (
+        {!repeatEnabled && accuracy != null && (
           <button
             type="button"
             className={styles.liveScore}
@@ -323,6 +439,121 @@ export function TransportBar() {
       </div>
 
       <div className={styles.seekRow}>
+        <div className={styles.timeline}>
+          <div className={styles.loopMeta}>
+            <span>
+              {shownRegion
+                ? `Bars ${Math.max(1, bars.indexOf(shownRegion.startMs) + 1)}–${Math.max(
+                    1,
+                    bars.indexOf(shownRegion.endMs),
+                  )}`
+                : "Whole song"}
+            </span>
+            {loopRegion && (
+              <button
+                type="button"
+                className={styles.clearLoop}
+                onClick={() => void transportSetLoopRegion(null)}
+              >
+                Clear region
+              </button>
+            )}
+          </div>
+          <div
+            ref={rulerRef}
+            className={styles.ruler}
+            aria-label="Bar loop selection"
+            onPointerDown={(event) => beginRegionDrag("create", event)}
+            onPointerMove={(event) => {
+              if (dragKind.current) updateRegionDrag(event.clientX);
+            }}
+            onPointerUp={finishRegionDrag}
+            onPointerCancel={finishRegionDrag}
+          >
+            {bars.slice(1, -1).map((boundary) => (
+              <span
+                key={boundary}
+                className={styles.barTick}
+                style={{ left: `${(boundary / Math.max(duration, 1)) * 100}%` }}
+                aria-hidden
+              />
+            ))}
+            {shownRegion && (
+              <>
+                <span
+                  className={styles.loopSelection}
+                  style={{
+                    left: `${(shownRegion.startMs / Math.max(duration, 1)) * 100}%`,
+                    width: `${
+                      ((shownRegion.endMs - shownRegion.startMs) /
+                        Math.max(duration, 1)) *
+                      100
+                    }%`,
+                  }}
+                  aria-hidden
+                />
+                <div
+                  className={styles.loopHandle}
+                  style={{
+                    left: `${(shownRegion.startMs / Math.max(duration, 1)) * 100}%`,
+                  }}
+                  role="slider"
+                  tabIndex={0}
+                  aria-label="Loop start"
+                  aria-valuemin={0}
+                  aria-valuemax={shownRegion.endMs}
+                  aria-valuenow={shownRegion.startMs}
+                  aria-valuetext={`Bar ${Math.max(
+                    1,
+                    bars.indexOf(shownRegion.startMs) + 1,
+                  )}`}
+                  onPointerDown={(event) => beginRegionDrag("start", event)}
+                  onPointerMove={(event) => {
+                    if (dragKind.current === "start") updateRegionDrag(event.clientX);
+                  }}
+                  onPointerUp={finishRegionDrag}
+                  onPointerCancel={finishRegionDrag}
+                  onKeyDown={(event) => {
+                    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      nudgeLoopBoundary("start", event.key === "ArrowLeft" ? -1 : 1);
+                    }
+                  }}
+                />
+                <div
+                  className={styles.loopHandle}
+                  style={{
+                    left: `${(shownRegion.endMs / Math.max(duration, 1)) * 100}%`,
+                  }}
+                  role="slider"
+                  tabIndex={0}
+                  aria-label="Loop end"
+                  aria-valuemin={shownRegion.startMs}
+                  aria-valuemax={duration}
+                  aria-valuenow={shownRegion.endMs}
+                  aria-valuetext={`Bar ${Math.max(
+                    1,
+                    bars.indexOf(shownRegion.endMs),
+                  )}`}
+                  onPointerDown={(event) => beginRegionDrag("end", event)}
+                  onPointerMove={(event) => {
+                    if (dragKind.current === "end") updateRegionDrag(event.clientX);
+                  }}
+                  onPointerUp={finishRegionDrag}
+                  onPointerCancel={finishRegionDrag}
+                  onKeyDown={(event) => {
+                    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      nudgeLoopBoundary("end", event.key === "ArrowLeft" ? -1 : 1);
+                    }
+                  }}
+                />
+              </>
+            )}
+          </div>
+        </div>
         <input
           className={styles.seek}
           type="range"
@@ -455,19 +686,21 @@ export function TransportBar() {
         >
           Calibrate
         </button>
-        <button
-          type="button"
-          className={styles.btn}
-          disabled={!song}
-          title={
-            song
-              ? "Open score details"
-              : "Load a MIDI file to view score stats"
-          }
-          onClick={() => setStatsOpen(true)}
-        >
-          Stats
-        </button>
+        {!repeatEnabled && (
+          <button
+            type="button"
+            className={styles.btn}
+            disabled={!song}
+            title={
+              song
+                ? "Open score details"
+                : "Load a MIDI file to view score stats"
+            }
+            onClick={() => setStatsOpen(true)}
+          >
+            Stats
+          </button>
+        )}
         <button
           type="button"
           className={styles.btn}

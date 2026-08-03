@@ -86,10 +86,44 @@ function approachRadius(padR: number, deltaMs: number): number {
   return padR + (deltaMs / KIT_APPROACH_MS) * (startR - padR);
 }
 
-function visibleApproachHits(hits: ExpectedHit[], now: number): ExpectedHit[] {
+function visibleApproachHits(
+  hits: ExpectedHit[],
+  now: number,
+  repeatEnabled: boolean,
+  loopRegion: { startMs: number; endMs: number } | null,
+  durationMs: number,
+): Array<ExpectedHit & { displayTimeMs: number; occurrenceKey: string }> {
   const lo = now - KIT_APPROACH_FADE_MS;
   const hi = now + KIT_APPROACH_MS;
-  return hits.filter((h) => h.timeMs > lo && h.timeMs <= hi);
+  if (!repeatEnabled) {
+    return hits
+      .filter((hit) => hit.timeMs > lo && hit.timeMs <= hi)
+      .map((hit) => ({
+        ...hit,
+        displayTimeMs: hit.timeMs,
+        occurrenceKey: String(hit.uid),
+      }));
+  }
+  const region = loopRegion ?? { startMs: 0, endMs: durationMs };
+  const length = region.endMs - region.startMs;
+  if (length <= 0) return [];
+  return hits
+    .filter((hit) => hit.timeMs >= region.startMs && hit.timeMs < region.endMs)
+    .flatMap((hit) => {
+      const firstCycle = Math.floor((lo - hit.timeMs) / length) + 1;
+      const lastCycle = Math.floor((hi - hit.timeMs) / length);
+      const occurrences = [];
+      for (let cycle = firstCycle; cycle <= lastCycle; cycle += 1) {
+        const offset = cycle * length;
+        occurrences.push({
+          ...hit,
+          displayTimeMs: hit.timeMs + offset,
+          occurrenceKey: `${hit.uid}:${cycle}`,
+        });
+      }
+      return occurrences;
+    })
+    .filter((hit) => hit.displayTimeMs > lo && hit.displayTimeMs <= hi);
 }
 
 export function DrumKitView() {
@@ -100,11 +134,20 @@ export function DrumKitView() {
   const expectedHits = useAppStore((s) => s.expectedHits);
   const positionMs = useAppStore((s) => s.positionMs);
   const transportStatus = useAppStore((s) => s.transportStatus);
+  const repeatEnabled = useAppStore((s) => s.repeatEnabled);
+  const loopRegion = useAppStore((s) => s.loopRegion);
+  const durationMs = useAppStore((s) => s.song?.durationMs ?? 0);
 
   const showTiming =
     transportStatus !== "stopped" && expectedHits.length > 0;
   const approachHits = showTiming
-    ? visibleApproachHits(expectedHits, positionMs)
+    ? visibleApproachHits(
+        expectedHits,
+        positionMs,
+        repeatEnabled,
+        loopRegion,
+        durationMs,
+      )
     : [];
 
   return (
@@ -152,7 +195,7 @@ export function DrumKitView() {
           return (
             <g key={pad.id}>
               {padApproaches.map((hit) => {
-                const delta = hit.timeMs - positionMs;
+                const delta = hit.displayTimeMs - positionMs;
                 const r = approachRadius(geo.r, delta);
                 if (r <= 0) return null;
                 const opacity =
@@ -161,7 +204,7 @@ export function DrumKitView() {
                     : 1;
                 return (
                   <circle
-                    key={hit.uid}
+                    key={hit.occurrenceKey}
                     className={styles.approach}
                     cx={geo.cx}
                     cy={geo.cy}

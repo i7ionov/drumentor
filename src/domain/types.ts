@@ -109,6 +109,7 @@ export interface SongSummary {
   path: string;
   trackCount: number;
   durationMs: number;
+  barBoundariesMs: number[];
   tracks: TrackInfo[];
   suggestedDrumTrackId: number | null;
 }
@@ -126,6 +127,11 @@ export interface AppInfo {
 
 export type TransportStatus = "stopped" | "playing" | "paused";
 
+export interface LoopRegion {
+  startMs: number;
+  endMs: number;
+}
+
 export interface ExpectedHit {
   uid: number;
   padId: PadId;
@@ -138,6 +144,8 @@ export interface PositionEvent {
   status: TransportStatus;
   durationMs: number;
   speed: number;
+  repeatEnabled: boolean;
+  loopRegion?: LoopRegion;
 }
 
 export interface TransportState {
@@ -145,6 +153,8 @@ export interface TransportState {
   positionMs: number;
   durationMs: number;
   speed: number;
+  repeatEnabled: boolean;
+  loopRegion?: LoopRegion;
 }
 
 export interface HighlightEvent {

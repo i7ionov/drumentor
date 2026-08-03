@@ -707,15 +707,15 @@ impl AudioEngine {
         }
     }
 
-    /// Schedule a click at session timeline `when_ms` (same clock as notes).
-    pub fn schedule_click(&self, when_ms: u64, index: u32) {
+    /// Schedule a click on the monotonic playback timeline used across loop wraps.
+    pub fn schedule_click_at(&self, virtual_when_ms: u64, index: u32) {
         let Ok(mut s) = self.shared.lock() else {
             return;
         };
         if !s.armed || s.click_muted || s.click_volume <= 0.0 {
             return;
         }
-        let start = s.session_to_sample(when_ms as f64);
+        let start = s.session_to_sample(virtual_when_ms as f64);
         if start + (s.sample_rate as u64 / 20) < s.sample_pos {
             return;
         }
@@ -736,7 +736,8 @@ impl AudioEngine {
         }
     }
 
-    pub fn schedule_note(&self, note: &ScheduleNote) {
+    /// Schedule a song note at an occurrence on the monotonic playback timeline.
+    pub fn schedule_note_at(&self, note: &ScheduleNote, virtual_when_ms: u64) {
         let Ok(mut s) = self.shared.lock() else {
             return;
         };
@@ -759,7 +760,7 @@ impl AudioEngine {
             return;
         }
 
-        let start = s.session_to_sample(note.when_ms as f64);
+        let start = s.session_to_sample(virtual_when_ms as f64);
         // Drop notes already far in the past.
         if start + (s.sample_rate as u64 / 20) < s.sample_pos {
             return;

@@ -6,6 +6,7 @@ import type {
   JudgementEvent,
   MidiInputPort,
   AudioDeviceInfo,
+  LoopRegion,
   PadId,
   PadMapProfile,
   SessionSummary,
@@ -151,6 +152,8 @@ interface AppState {
   sessionSummary: SessionSummary | null;
   latencyOffsetMs: number;
   playbackSpeed: number;
+  repeatEnabled: boolean;
+  loopRegion: LoopRegion | null;
   error: string | null;
   setSong: (song: SongSummary | null) => void;
   setSelectedDrumTrackId: (id: number | null) => void;
@@ -188,6 +191,8 @@ interface AppState {
   setSessionSummary: (summary: SessionSummary | null) => void;
   setLatencyOffsetMs: (ms: number) => void;
   setPlaybackSpeed: (speed: number) => void;
+  setRepeatEnabled: (enabled: boolean) => void;
+  setLoopRegion: (region: LoopRegion | null) => void;
   resetLiveScore: () => void;
   setError: (error: string | null) => void;
 }
@@ -226,6 +231,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   sessionSummary: null,
   latencyOffsetMs: 0,
   playbackSpeed: 1,
+  repeatEnabled: false,
+  loopRegion: null,
   error: null,
   setSong: (song) =>
     set({
@@ -238,6 +245,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       lastJudgement: null,
       sessionSummary: null,
       statsOpen: false,
+      repeatEnabled: false,
+      loopRegion: null,
       error: null,
       muteDrums: false,
       trackMixer: emptyTrackMixer(song),
@@ -404,6 +413,18 @@ export const useAppStore = create<AppState>((set, get) => ({
     }),
   setLatencyOffsetMs: (ms) => set({ latencyOffsetMs: ms }),
   setPlaybackSpeed: (speed) => set({ playbackSpeed: speed }),
+  setRepeatEnabled: (enabled) =>
+    set({
+      repeatEnabled: enabled,
+      statsOpen: enabled ? false : get().statsOpen,
+      ...(enabled
+        ? {
+            liveHitCounts: { ...EMPTY_HIT_COUNTS },
+            sessionSummary: null,
+          }
+        : {}),
+    }),
+  setLoopRegion: (region) => set({ loopRegion: region }),
   resetLiveScore: () =>
     set({
       liveHitCounts: { ...EMPTY_HIT_COUNTS },

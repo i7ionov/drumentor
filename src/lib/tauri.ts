@@ -10,6 +10,7 @@ import type {
   HitCounts,
   IncomingHit,
   JudgementEvent,
+  LoopRegion,
   MidiInputPort,
   MidiNoteOnEvent,
   PadMapProfile,
@@ -400,13 +401,37 @@ function applyTransportSnapshot(state: {
   status: TransportStatus;
   positionMs: number;
   speed?: number;
+  repeatEnabled?: boolean;
+  loopRegion?: LoopRegion | null;
 }): void {
-  const { setTransportStatus, setPositionMs, setPlaybackSpeed } =
+  const {
+    setTransportStatus,
+    setPositionMs,
+    setPlaybackSpeed,
+    setRepeatEnabled,
+    setLoopRegion,
+  } =
     useAppStore.getState();
   setTransportStatus(state.status);
   setPositionMs(state.positionMs);
   if (state.speed != null && Number.isFinite(state.speed)) {
     setPlaybackSpeed(state.speed);
+  }
+  if (
+    state.repeatEnabled != null &&
+    state.repeatEnabled !== useAppStore.getState().repeatEnabled
+  ) {
+    setRepeatEnabled(state.repeatEnabled);
+  }
+  if ("loopRegion" in state) {
+    const current = useAppStore.getState().loopRegion;
+    const next = state.loopRegion ?? null;
+    if (
+      current?.startMs !== next?.startMs ||
+      current?.endMs !== next?.endMs
+    ) {
+      setLoopRegion(next);
+    }
   }
 }
 
@@ -480,15 +505,50 @@ export async function transportSetSpeed(speed: number): Promise<void> {
   }
 }
 
+export async function transportSetRepeat(enabled: boolean): Promise<void> {
+  const { setError } = useAppStore.getState();
+  try {
+    const state = await invoke<TransportState>("transport_set_repeat", { enabled });
+    applyTransportSnapshot({
+      ...state,
+      loopRegion: state.loopRegion ?? null,
+    });
+  } catch (e) {
+    setError(e instanceof Error ? e.message : String(e));
+  }
+}
+
+export async function transportSetLoopRegion(
+  region: LoopRegion | null,
+): Promise<void> {
+  const { setError } = useAppStore.getState();
+  try {
+    const state = await invoke<TransportState>("transport_set_loop_region", {
+      region,
+    });
+    applyTransportSnapshot({
+      ...state,
+      loopRegion: state.loopRegion ?? null,
+    });
+  } catch (e) {
+    setError(e instanceof Error ? e.message : String(e));
+  }
+}
+
 export async function startTransportListeners(): Promise<() => void> {
   const unlisteners: UnlistenFn[] = [];
 
   unlisteners.push(
     await listen<PositionEvent>("transport:position", (event) => {
-      const { positionMs, status } = event.payload;
+      const { positionMs, status, repeatEnabled, loopRegion } = event.payload;
       // Do not sync speed from the high-frequency ticker — it races with
       // optimistic UI updates and can snap the control back to 100%.
-      applyTransportSnapshot({ status, positionMs });
+      applyTransportSnapshot({
+        status,
+        positionMs,
+        repeatEnabled,
+        loopRegion: loopRegion ?? null,
+      });
       const song = useAppStore.getState().song;
       if (song && event.payload.durationMs !== song.durationMs) {
         useAppStore.setState({
@@ -525,14 +585,17 @@ export async function startTransportListeners(): Promise<() => void> {
 
   unlisteners.push(
     await listen<HitCounts>("score:liveCounts", (event) => {
-      useAppStore.getState().setLiveHitCounts(event.payload);
+      const store = useAppStore.getState();
+      if (!store.repeatEnabled) store.setLiveHitCounts(event.payload);
     }),
   );
 
   unlisteners.push(
     await listen<SessionSummary>("score:sessionSummary", (event) => {
-      useAppStore.getState().setSessionSummary(event.payload);
-      useAppStore.getState().setLiveHitCounts(event.payload.hitCounts);
+      const store = useAppStore.getState();
+      if (store.repeatEnabled) return;
+      store.setSessionSummary(event.payload);
+      store.setLiveHitCounts(event.payload.hitCounts);
     }),
   );
 

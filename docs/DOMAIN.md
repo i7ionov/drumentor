@@ -114,6 +114,23 @@ After selecting a drum track:
 
 On **speed change** (v1): either scale `timeMs`, or store musical ticks and compute time on the fly. Preferred implementation: store ticks + tempo map, compute `timeMs` with speed applied.
 
+## Repeat and musical grid
+
+`SongSummary.barBoundariesMs` contains the measure boundaries derived from MIDI ticks, tempo changes, and `TimeSignature` meta events. If a file has no time signature, the grid defaults to 4/4. The final song position is included so the last partial measure can be selected.
+
+```text
+LoopRegion {
+  startMs   // inclusive bar boundary
+  endMs     // exclusive bar boundary
+}
+```
+
+- `repeatEnabled = false`: a stored region has no playback effect.
+- `repeatEnabled = true` with a region: only `[startMs, endMs)` repeats.
+- `repeatEnabled = true` without a region: the whole song repeats.
+- Region selection is session-local and resets when another MIDI file is loaded.
+- Repeat keeps `Judgement` feedback for the current hit. Expected hits in the active range are reopened on every pass, but aggregate counts and session summaries are neither displayed nor persisted.
+
 ## PadMapProfile
 
 ```text

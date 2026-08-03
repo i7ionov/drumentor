@@ -102,7 +102,86 @@
 .seekRow {
   grid-column: 1 / -1;
   display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
   align-items: center;
+}
+
+.timeline {
+  width: 100%;
+}
+
+.loopMeta {
+  display: flex;
+  min-height: 1.25rem;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.clearLoop {
+  appearance: none;
+  border: 0;
+  padding: 0.1rem 0.3rem;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.clearLoop:hover {
+  color: var(--accent);
+}
+
+.ruler {
+  position: relative;
+  width: 100%;
+  height: 1.4rem;
+  overflow: visible;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-2);
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.barTick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: color-mix(in srgb, var(--text-muted) 28%, transparent);
+  pointer-events: none;
+}
+
+.loopSelection {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  pointer-events: none;
+}
+
+.loopHandle {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  width: 0.7rem;
+  height: 1.8rem;
+  border: 2px solid var(--accent);
+  border-radius: 4px;
+  background: var(--surface-2);
+  cursor: ew-resize;
+  touch-action: none;
+  transform: translate(-50%, -50%);
+}
+
+.loopHandle:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
 }
 
 .seek {

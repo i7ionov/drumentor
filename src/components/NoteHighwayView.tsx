@@ -44,10 +44,41 @@ function msToStagePercent(ms: number, hitLineY: number): number {
 function visibleHits(
   hits: ExpectedHit[],
   now: number,
-): ExpectedHit[] {
+  repeatEnabled: boolean,
+  loopRegion: { startMs: number; endMs: number } | null,
+  durationMs: number,
+): Array<ExpectedHit & { displayTimeMs: number; occurrenceKey: string }> {
   const lo = now - FADE_MS;
   const hi = now + APPROACH_MS;
-  return hits.filter((h) => h.timeMs > lo && h.timeMs <= hi);
+  if (!repeatEnabled) {
+    return hits
+      .filter((h) => h.timeMs > lo && h.timeMs <= hi)
+      .map((hit) => ({
+        ...hit,
+        displayTimeMs: hit.timeMs,
+        occurrenceKey: String(hit.uid),
+      }));
+  }
+  const region = loopRegion ?? { startMs: 0, endMs: durationMs };
+  const length = region.endMs - region.startMs;
+  if (length <= 0) return [];
+  return hits
+    .filter((hit) => hit.timeMs >= region.startMs && hit.timeMs < region.endMs)
+    .flatMap((hit) => {
+      const firstCycle = Math.floor((lo - hit.timeMs) / length) + 1;
+      const lastCycle = Math.floor((hi - hit.timeMs) / length);
+      const occurrences = [];
+      for (let cycle = firstCycle; cycle <= lastCycle; cycle += 1) {
+        const offset = cycle * length;
+        occurrences.push({
+          ...hit,
+          displayTimeMs: hit.timeMs + offset,
+          occurrenceKey: `${hit.uid}:${cycle}`,
+        });
+      }
+      return occurrences;
+    })
+    .filter((hit) => hit.displayTimeMs > lo && hit.displayTimeMs <= hi);
 }
 
 function laneIdsForHits(hits: ExpectedHit[]): PadId[] {
@@ -80,14 +111,23 @@ export function NoteHighwayView() {
   const setHitLineY = useAppStore((s) => s.setHitLineY);
   const activePads = useAppStore((s) => s.activePads);
   const padJudgements = useAppStore((s) => s.padJudgements);
+  const repeatEnabled = useAppStore((s) => s.repeatEnabled);
+  const loopRegion = useAppStore((s) => s.loopRegion);
 
   const stageRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
 
   const lanes = useMemo(() => laneIdsForHits(expectedHits), [expectedHits]);
   const notes = useMemo(
-    () => visibleHits(expectedHits, positionMs),
-    [expectedHits, positionMs],
+    () =>
+      visibleHits(
+        expectedHits,
+        positionMs,
+        repeatEnabled,
+        loopRegion,
+        song?.durationMs ?? 0,
+      ),
+    [expectedHits, loopRegion, positionMs, repeatEnabled, song?.durationMs],
   );
 
   const windowBand = useMemo(() => {
@@ -230,8 +270,8 @@ export function NoteHighwayView() {
               {notes.map((hit) => {
                 const laneIndex = lanes.indexOf(hit.padId);
                 if (laneIndex < 0) return null;
-                const top = noteTopPercent(hit.timeMs, positionMs, hitLineY);
-                const delta = hit.timeMs - positionMs;
+                const top = noteTopPercent(hit.displayTimeMs, positionMs, hitLineY);
+                const delta = hit.displayTimeMs - positionMs;
                 const opacity =
                   delta < 0
                     ? Math.max(0, 1 - (-delta) / FADE_MS)
@@ -245,7 +285,7 @@ export function NoteHighwayView() {
                 const size = 0.55 + (hit.velocity / 127) * 0.45 + approach * 0.35;
                 return (
                   <div
-                    key={hit.uid}
+                    key={hit.occurrenceKey}
                     className={
                       approach > 0.35
                         ? `${styles.note} ${styles.noteHot}`

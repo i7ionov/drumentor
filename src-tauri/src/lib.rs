@@ -452,6 +452,24 @@ fn transport_set_speed(
     transport::set_speed(app, &session, speed)
 }
 
+#[tauri::command]
+fn transport_set_repeat(
+    enabled: bool,
+    app: AppHandle,
+    session: State<'_, AppSession>,
+) -> Result<TransportState, String> {
+    transport::set_repeat_enabled(app, &session, enabled)
+}
+
+#[tauri::command]
+fn transport_set_loop_region(
+    region: Option<domain::LoopRegion>,
+    app: AppHandle,
+    session: State<'_, AppSession>,
+) -> Result<TransportState, String> {
+    transport::set_loop_region(app, &session, region)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -586,6 +604,8 @@ pub fn run() {
             transport_stop,
             transport_seek,
             transport_set_speed,
+            transport_set_repeat,
+            transport_set_loop_region,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
