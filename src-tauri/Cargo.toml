@@ -1,6 +1,6 @@
 [package]
 name = "drumentor"
-version = "0.1.0"
+version = "0.1.1"
 description = "Desktop drum learning app"
 authors = ["Drumentor"]
 edition = "2021"
